@@ -130,7 +130,7 @@ export default function TicketListPage() {
               width: 90,
               render: (id: number) => (
                 <Link to={`/tickets/${id}`}>
-                  <Typography.Text copyable={{ text: id }}>#{id}</Typography.Text>
+                  <Typography.Text copyable={{ text: String(id) }}>#{id}</Typography.Text>
                 </Link>
               ),
             },
