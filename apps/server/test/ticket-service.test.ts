@@ -147,6 +147,16 @@ describe('DAG 完整性【spec §3.3】', () => {
     expect(err.code).toBe('DAG_INVALID');
   });
 
+  test('STORY 带 parentId → DAG_INVALID（STORY 无父）', () => {
+    const { service } = createTestContext();
+    const story = service.createTicket({ type: 'STORY', title: '父故事' });
+    const err = captureError(() =>
+      service.createTicket({ type: 'STORY', title: '非法嵌套故事', parentId: story.id }),
+    );
+    expect(err.code).toBe('DAG_INVALID');
+    expect(err.message).toContain('仅 TASK');
+  });
+
   test('parentId 不存在 → DAG_INVALID', () => {
     const { service } = createTestContext();
     const err = captureError(() =>

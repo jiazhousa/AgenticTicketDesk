@@ -34,5 +34,10 @@ export function buildApp(db: BetterSQLite3Database<typeof schema>): FastifyInsta
     return reply.code(500).send({ error: { code: 'INTERNAL', message: '系统内部错误' } });
   });
 
+  // 未匹配路由统一走错误信封
+  app.setNotFoundHandler((_req, reply) => {
+    return reply.code(404).send({ error: { code: 'NOT_FOUND', message: '资源不存在' } });
+  });
+
   return app;
 }

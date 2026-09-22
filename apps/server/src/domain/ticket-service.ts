@@ -80,6 +80,13 @@ export class TicketService {
   }): Ticket {
     return this.db.transaction((tx) => {
       if (input.parentId != null) {
+        if (input.type !== 'TASK') {
+          throw new AppError(
+            'DAG_INVALID',
+            `仅 TASK 可指定父单，${input.type} 不支持 parentId`,
+            [`type=${input.type}`, `parentId=${input.parentId}`],
+          );
+        }
         const parent = tx.select().from(tickets).where(eq(tickets.id, input.parentId)).get();
         if (!parent || parent.type !== 'STORY') {
           throw new AppError(
