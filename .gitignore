@@ -1,1 +1,4 @@
 test-fence-reports/
+node_modules/
+dist/
+apps/server/data/

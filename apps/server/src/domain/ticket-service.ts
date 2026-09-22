@@ -1,0 +1,431 @@
+import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
+import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import { comments, ticketDependencies, ticketTransitions, tickets } from '../db/schema.js';
+import type * as schema from '../db/schema.js';
+import { AppError } from './errors.js';
+import { TRANSITIONS, type Status, type TicketType } from './status.js';
+
+/** 工单视图（API/TS 侧 camelCase） */
+export type Ticket = {
+  id: number;
+  type: TicketType;
+  title: string;
+  description: string | null;
+  status: Status;
+  parentId: number | null;
+  specContent: string | null;
+  workerId: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** 列表项：附父子关系便于树展示 */
+export type TicketListItem = Ticket & { childrenCount: number; parentTitle: string | null };
+
+export type Comment = {
+  id: number;
+  ticketId: number;
+  authorType: string;
+  authorName: string;
+  content: string;
+  createdAt: number;
+};
+
+export type Transition = {
+  id: number;
+  ticketId: number;
+  fromStatus: Status;
+  toStatus: Status;
+  operator: string;
+  note: string | null;
+  createdAt: number;
+};
+
+/** GET /api/tickets/:id 响应体；hasCancelledChildren 为 A7 前端告警锚点 */
+export type TicketDetail = {
+  ticket: Ticket;
+  children: Ticket[];
+  dependencies: Ticket[];
+  comments: Comment[];
+  transitions: Transition[];
+  hasCancelledChildren: boolean;
+};
+
+type TicketRow = typeof tickets.$inferSelect;
+type TxCallback = Parameters<BetterSQLite3Database<typeof schema>['transaction']>[0];
+type Tx = Parameters<TxCallback>[0];
+
+function toTicket(row: TicketRow): Ticket {
+  return { ...row, type: row.type as TicketType, status: row.status as Status };
+}
+
+/** 依赖/子单未完成明细的统一格式：`#<id> <标题>（<状态>）` */
+function pendingLabel(t: Ticket): string {
+  return `#${t.id} ${t.title}（${t.status}）`;
+}
+
+/**
+ * 工单核心域服务：CRUD / 状态机 / DAG 校验 / 留言。
+ * 同步驱动铁则 1：事务回调内只写同步代码（better-sqlite3）。
+ */
+export class TicketService {
+  constructor(private readonly db: BetterSQLite3Database<typeof schema>) {}
+
+  /** 建单（初始态固定 DRAFT）；parentId 必须指向存在的 STORY，且仅 TASK 可有父 */
+  createTicket(input: {
+    type: TicketType;
+    title: string;
+    description?: string | null;
+    parentId?: number | null;
+  }): Ticket {
+    return this.db.transaction((tx) => {
+      if (input.parentId != null) {
+        if (input.type !== 'TASK') {
+          throw new AppError(
+            'DAG_INVALID',
+            `仅 TASK 可指定父单，${input.type} 不支持 parentId`,
+            [`type=${input.type}`, `parentId=${input.parentId}`],
+          );
+        }
+        const parent = tx.select().from(tickets).where(eq(tickets.id, input.parentId)).get();
+        if (!parent || parent.type !== 'STORY') {
+          throw new AppError(
+            'DAG_INVALID',
+            `父单 #${input.parentId} 不存在或不是 STORY`,
+            [`parentId=${input.parentId}`],
+          );
+        }
+      }
+      const now = Date.now();
+      const row = tx
+        .insert(tickets)
+        .values({
+          type: input.type,
+          title: input.title,
+          description: input.description ?? null,
+          status: 'DRAFT',
+          parentId: input.parentId ?? null,
+          specContent: null,
+          workerId: null,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning()
+        .get();
+      return toTicket(row);
+    });
+  }
+
+  /** 列表（默认排序 createdAt DESC，同毫秒按 id DESC 兜底）；附 childrenCount/parentTitle */
+  listTickets(filter: { status?: Status; type?: TicketType } = {}): TicketListItem[] {
+    const conds = [];
+    if (filter.status) conds.push(eq(tickets.status, filter.status));
+    if (filter.type) conds.push(eq(tickets.type, filter.type));
+    const rows = this.db
+      .select()
+      .from(tickets)
+      .where(conds.length ? and(...conds) : undefined)
+      .orderBy(desc(tickets.createdAt), desc(tickets.id))
+      .all();
+
+    const parentIds = [...new Set(rows.map((r) => r.parentId).filter((v): v is number => v != null))];
+    const parentTitleById = new Map<number, string>();
+    if (parentIds.length > 0) {
+      for (const p of this.db
+        .select({ id: tickets.id, title: tickets.title })
+        .from(tickets)
+        .where(inArray(tickets.id, parentIds))
+        .all()) {
+        parentTitleById.set(p.id, p.title);
+      }
+    }
+    const childrenCountById = new Map<number, number>();
+    for (const c of this.db
+      .select({ parentId: tickets.parentId })
+      .from(tickets)
+      .where(isNotNull(tickets.parentId))
+      .all()) {
+      childrenCountById.set(c.parentId!, (childrenCountById.get(c.parentId!) ?? 0) + 1);
+    }
+    return rows.map((r) => ({
+      ...toTicket(r),
+      childrenCount: childrenCountById.get(r.id) ?? 0,
+      parentTitle: r.parentId != null ? (parentTitleById.get(r.parentId) ?? null) : null,
+    }));
+  }
+
+  /** 读单（不存在 → 404 NOT_FOUND） */
+  getTicket(id: number): Ticket {
+    const row = this.db.select().from(tickets).where(eq(tickets.id, id)).get();
+    if (!row) throw new AppError('NOT_FOUND', `工单 #${id} 不存在`);
+    return toTicket(row);
+  }
+
+  /** 详情聚合：子单 / blockedBy 依赖 / 留言（正序）/ 转移历史（插入序）/ CANCELLED 子单提示锚点 */
+  getTicketDetail(id: number): TicketDetail {
+    const ticket = this.getTicket(id);
+    const children = this.db
+      .select()
+      .from(tickets)
+      .where(eq(tickets.parentId, id))
+      .orderBy(asc(tickets.id))
+      .all()
+      .map(toTicket);
+    const dependencies = this.db
+      .select({ t: tickets })
+      .from(ticketDependencies)
+      .innerJoin(tickets, eq(ticketDependencies.blockedByTicketId, tickets.id))
+      .where(eq(ticketDependencies.ticketId, id))
+      .orderBy(asc(ticketDependencies.id))
+      .all()
+      .map((r) => toTicket(r.t));
+    const commentRows = this.db
+      .select()
+      .from(comments)
+      .where(eq(comments.ticketId, id))
+      .orderBy(asc(comments.id))
+      .all();
+    const transitionRows = this.db
+      .select()
+      .from(ticketTransitions)
+      .where(eq(ticketTransitions.ticketId, id))
+      .orderBy(asc(ticketTransitions.id))
+      .all();
+    return {
+      ticket,
+      children,
+      dependencies,
+      comments: commentRows.map((r) => ({ ...r })),
+      transitions: transitionRows.map((r) => ({
+        ...r,
+        fromStatus: r.fromStatus as Status,
+        toStatus: r.toStatus as Status,
+      })),
+      hasCancelledChildren: children.some((c) => c.status === 'CANCELLED'),
+    };
+  }
+
+  /** 编辑（仅 DRAFT 态；至少一项校验在路由 zod） */
+  updateTicket(
+    id: number,
+    patch: { title?: string; description?: string; specContent?: string },
+  ): Ticket {
+    return this.db.transaction((tx) => {
+      const row = tx.select().from(tickets).where(eq(tickets.id, id)).get();
+      if (!row) throw new AppError('NOT_FOUND', `工单 #${id} 不存在`);
+      if (row.status !== 'DRAFT') {
+        throw new AppError('NOT_DRAFT', `仅 DRAFT 态可编辑，当前为 ${row.status}`);
+      }
+      const updated = tx
+        .update(tickets)
+        .set({
+          ...(patch.title !== undefined ? { title: patch.title } : {}),
+          ...(patch.description !== undefined ? { description: patch.description } : {}),
+          ...(patch.specContent !== undefined ? { specContent: patch.specContent } : {}),
+          updatedAt: Date.now(),
+        })
+        .where(eq(tickets.id, id))
+        .returning()
+        .get();
+      return toTicket(updated);
+    });
+  }
+
+  /**
+   * 提交 spec：写 specContent + 转 SPEC_READY（冻结快照）。
+   * 独立路径，不经 transition()——/transition 端点无法绕开冻结逻辑。
+   */
+  submitSpec(id: number, specContent: string): Ticket {
+    return this.db.transaction((tx) => {
+      const row = tx.select().from(tickets).where(eq(tickets.id, id)).get();
+      if (!row) throw new AppError('NOT_FOUND', `工单 #${id} 不存在`);
+      if (row.status !== 'DRAFT') {
+        throw new AppError('NOT_DRAFT', `仅 DRAFT 态可提交 spec，当前为 ${row.status}`);
+      }
+      const now = Date.now();
+      const updated = tx
+        .update(tickets)
+        .set({ specContent, status: 'SPEC_READY', updatedAt: now })
+        .where(eq(tickets.id, id))
+        .returning()
+        .get();
+      tx.insert(ticketTransitions)
+        .values({
+          ticketId: id,
+          fromStatus: 'DRAFT',
+          toStatus: 'SPEC_READY',
+          operator: 'user',
+          note: 'submit spec',
+          createdAt: now,
+        })
+        .run();
+      return toTicket(updated);
+    });
+  }
+
+  /**
+   * 状态转移（白名单 + blockedBy 门 + STORY 聚合门），事务内落 transitions。
+   * to=SPEC_READY 对任意来源态一律拒绝（USE_SPEC_ENDPOINT），防绕开冻结逻辑。
+   */
+  transition(id: number, to: Status, operator: string, note?: string | null): Ticket {
+    return this.db.transaction((tx) => {
+      const row = tx.select().from(tickets).where(eq(tickets.id, id)).get();
+      if (!row) throw new AppError('NOT_FOUND', `工单 #${id} 不存在`);
+      if (to === 'SPEC_READY') {
+        throw new AppError('USE_SPEC_ENDPOINT', 'SPEC_READY 只能经 POST /api/tickets/:id/spec 进入');
+      }
+      if (!TRANSITIONS[row.status as Status].includes(to)) {
+        throw new AppError('INVALID_TRANSITION', `非法转移：${row.status} → ${to}`);
+      }
+      if (to === 'DISPATCHED') {
+        this.assertDependenciesDone(tx, id);
+      }
+      if (to === 'DONE' && row.type === 'STORY') {
+        this.assertChildrenSettled(tx, id);
+      }
+      const now = Date.now();
+      const updated = tx
+        .update(tickets)
+        .set({ status: to, updatedAt: now })
+        .where(eq(tickets.id, id))
+        .returning()
+        .get();
+      tx.insert(ticketTransitions)
+        .values({
+          ticketId: id,
+          fromStatus: row.status,
+          toStatus: to,
+          operator,
+          note: note ?? null,
+          createdAt: now,
+        })
+        .run();
+      return toTicket(updated);
+    });
+  }
+
+  /** 留言（正序按 id 排序展示） */
+  addComment(
+    id: number,
+    input: { authorType: string; authorName: string; content: string },
+  ): Comment {
+    return this.db.transaction((tx) => {
+      const row = tx.select().from(tickets).where(eq(tickets.id, id)).get();
+      if (!row) throw new AppError('NOT_FOUND', `工单 #${id} 不存在`);
+      const inserted = tx
+        .insert(comments)
+        .values({
+          ticketId: id,
+          authorType: input.authorType,
+          authorName: input.authorName,
+          content: input.content,
+          createdAt: Date.now(),
+        })
+        .returning()
+        .get();
+      return { ...inserted };
+    });
+  }
+
+  /** 加 blockedBy 依赖边：禁自依赖 / 禁重复 / 禁成环（沿 blockedBy 链 DFS） */
+  addDependency(id: number, blockedByTicketId: number): void {
+    this.db.transaction((tx) => {
+      const self = tx.select().from(tickets).where(eq(tickets.id, id)).get();
+      if (!self) throw new AppError('NOT_FOUND', `工单 #${id} 不存在`);
+      const target = tx.select().from(tickets).where(eq(tickets.id, blockedByTicketId)).get();
+      if (!target) throw new AppError('NOT_FOUND', `blockedBy 目标工单 #${blockedByTicketId} 不存在`);
+      if (id === blockedByTicketId) {
+        throw new AppError('DAG_INVALID', '禁止自依赖', [`#${id}`]);
+      }
+      const dup = tx
+        .select()
+        .from(ticketDependencies)
+        .where(
+          and(
+            eq(ticketDependencies.ticketId, id),
+            eq(ticketDependencies.blockedByTicketId, blockedByTicketId),
+          ),
+        )
+        .get();
+      if (dup) {
+        throw new AppError('DAG_INVALID', '依赖已存在', [`#${id} blockedBy #${blockedByTicketId}`]);
+      }
+      // 环检测：新边 id→blockedByTicketId 成环 ⟺ 从 blockedByTicketId 沿既有边可回到 id
+      const edges = new Map<number, number[]>();
+      for (const d of tx
+        .select({ ticketId: ticketDependencies.ticketId, blockedByTicketId: ticketDependencies.blockedByTicketId })
+        .from(ticketDependencies)
+        .all()) {
+        const list = edges.get(d.ticketId) ?? [];
+        list.push(d.blockedByTicketId);
+        edges.set(d.ticketId, list);
+      }
+      const visited = new Set<number>();
+      const stack = [blockedByTicketId];
+      while (stack.length > 0) {
+        const cur = stack.pop()!;
+        if (cur === id) {
+          throw new AppError('DAG_INVALID', '依赖成环', [`#${id} ⇄ #${blockedByTicketId}`]);
+        }
+        if (visited.has(cur)) continue;
+        visited.add(cur);
+        stack.push(...(edges.get(cur) ?? []));
+      }
+      tx.insert(ticketDependencies)
+        .values({ ticketId: id, blockedByTicketId, createdAt: Date.now() })
+        .run();
+    });
+  }
+
+  /** 删依赖边（幂等：边不存在时静默 204） */
+  removeDependency(id: number, blockedByTicketId: number): void {
+    const row = this.db.select().from(tickets).where(eq(tickets.id, id)).get();
+    if (!row) throw new AppError('NOT_FOUND', `工单 #${id} 不存在`);
+    this.db
+      .delete(ticketDependencies)
+      .where(
+        and(
+          eq(ticketDependencies.ticketId, id),
+          eq(ticketDependencies.blockedByTicketId, blockedByTicketId),
+        ),
+      )
+      .run();
+  }
+
+  /** 放行前置门：所有 blockedBy 单须 DONE（CANCELLED 不视为完成，可先删依赖边解除） */
+  private assertDependenciesDone(tx: Tx, id: number): void {
+    const depTickets = tx
+      .select({ t: tickets })
+      .from(ticketDependencies)
+      .innerJoin(tickets, eq(ticketDependencies.blockedByTicketId, tickets.id))
+      .where(eq(ticketDependencies.ticketId, id))
+      .all()
+      .map((r) => toTicket(r.t));
+    const pending = depTickets.filter((t) => t.status !== 'DONE');
+    if (pending.length > 0) {
+      throw new AppError(
+        'BLOCKED_BY_PENDING',
+        '存在未完成的 blockedBy 依赖单，禁止放行',
+        pending.map(pendingLabel),
+      );
+    }
+  }
+
+  /** STORY 聚合门：子单须全部 DONE/CANCELLED（CANCELLED 视为已收敛，不阻塞） */
+  private assertChildrenSettled(tx: Tx, id: number): void {
+    const children = tx
+      .select()
+      .from(tickets)
+      .where(eq(tickets.parentId, id))
+      .all()
+      .map(toTicket);
+    const pending = children.filter((c) => c.status !== 'DONE' && c.status !== 'CANCELLED');
+    if (pending.length > 0) {
+      throw new AppError(
+        'CHILDREN_PENDING',
+        '子单未全部完成，父单禁止关单',
+        pending.map(pendingLabel),
+      );
+    }
+  }
+}
