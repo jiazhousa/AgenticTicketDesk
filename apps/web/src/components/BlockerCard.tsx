@@ -16,15 +16,17 @@ const RESOLUTION_OPTIONS: { value: Resolution; label: string; description: strin
 
 /**
  * 卡点处理卡：BLOCKER 单入口 + 裁决弹层。
- * 两个消费视角：
+ * 三个消费视角：
  * - 父单（BLOCKED 态）详情页：传 detail.blocker，卡内提供 BLOCKER 单入口
  * - BLOCKER 单自身详情页：传 ticket 自身 + parentTicketId，卡内提供父单入口
+ * - 工作台阻塞区：compact=true 隐藏流程说明文字（工作台已有上下文，紧凑呈现）
  * 裁决提交 → POST /resolve：note 落 BLOCKER 留言 → BLOCKER 关单 → 按裁决转父单。
  */
 export default function BlockerCard({
   blocker,
   parentTicketId,
   blockReason,
+  compact = false,
   onChanged,
 }: {
   blocker: Ticket;
@@ -32,6 +34,8 @@ export default function BlockerCard({
   parentTicketId?: number;
   /** 当前轮报告的卡点说明（父单视角从 detail.report 透传；缺失不展示） */
   blockReason?: string | null;
+  /** 紧凑模式：隐藏流程指引文字（工作台用） */
+  compact?: boolean;
   onChanged: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -103,10 +107,12 @@ export default function BlockerCard({
           )}
         </Space>
 
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-          处理流程：先在卡点单留言结论（卡点单详情页留言区），再回到此处关单并选择裁决方式——
-          裁决将同时关闭卡点单并转移父单状态。
-        </Typography.Paragraph>
+        {!compact && (
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+            处理流程：先在卡点单留言结论（卡点单详情页留言区），再回到此处关单并选择裁决方式——
+            裁决将同时关闭卡点单并转移父单状态。
+          </Typography.Paragraph>
+        )}
 
         <Button type="primary" danger onClick={() => setOpen(true)}>
           处理并关单（裁决）

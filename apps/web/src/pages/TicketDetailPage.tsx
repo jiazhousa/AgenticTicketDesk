@@ -10,14 +10,17 @@ import SpecCard from '../components/SpecCard';
 import DependencyPanel from '../components/DependencyPanel';
 import CommentStream from '../components/CommentStream';
 import Timeline from '../components/Timeline';
-import WorkerCard from '../components/WorkerCard';
+import ExecutionCard from '../components/ExecutionCard';
+import StorySwimlane from '../components/StorySwimlane';
 import ReportCard from '../components/ReportCard';
 import BlockerCard from '../components/BlockerCard';
 import { formatTime } from '../utils/format';
 
 /**
- * 工单详情页：卡布局——①基本信息+状态操作 ②执行卡（worker 绑定后）③完成报告（DONE）④卡点处理（BLOCKED/BLOCKER）
- * ⑤spec 快照 ⑥依赖与父子 ⑦留言+时间线。
+ * 工单详情页（验收反馈后瘦身）：执行卡只留 状态/worker/轮次/时长 + 日志入口——
+ * worker 原始事件流不在详情页展示（独立日志页）。卡布局：
+ * ①基本信息+状态操作 ②执行卡（瘦身后）③完成报告（DONE）④卡点处理（BLOCKED/BLOCKER）
+ * ⑤Story 泳道链（STORY 核心区块：子单依赖 DAG）⑥spec 快照 ⑦依赖与父子 ⑧留言+时间线。
  * hasCancelledChildren=true 时顶部 Alert 提示（A7 锚点：CANCELLED 子单不阻塞父单关单，需人工裁决）。
  */
 export default function TicketDetailPage() {
@@ -128,12 +131,13 @@ export default function TicketDetailPage() {
           </div>
         </Card>
 
-        {/* 卡2：执行（worker 绑定后；含事件流尾部与 worktree 回收） */}
+        {/* 卡2：执行（瘦身后：状态+worker+轮次+时长+日志入口；worker 绑定或执行过的 TASK 展示） */}
         {ticket.type === 'TASK' && (ticket.workerId != null || ticket.round >= 1) && (
-          <WorkerCard
+          <ExecutionCard
             ticket={ticket}
             workerName={detail.workerName}
             execution={detail.execution}
+            transitions={detail.transitions}
             onChanged={() => reload()}
           />
         )}
@@ -161,15 +165,22 @@ export default function TicketDetailPage() {
             />
           ))}
 
-        {/* 卡4：卡点处理——BLOCKER 单自身视角（resolve 入口） */}
-        {ticket.type === 'BLOCKER' && ticket.status === 'IN_PROGRESS' && (
+        {/* 卡4：卡点处理——BLOCKER 单自身视角（resolve 入口；卡点单呈现 BLOCKED(pending:l3)） */}
+        {ticket.type === 'BLOCKER' && ticket.status === 'BLOCKED' && (
           <BlockerCard blocker={ticket} parentTicketId={blocks[0]?.id} onChanged={() => reload()} />
         )}
 
-        {/* 卡5：spec 快照 */}
+        {/* 卡5：Story 泳道链（STORY 核心区块：子单依赖分层 DAG，并行同列、串行向下） */}
+        {ticket.type === 'STORY' && (
+          <Card title="编排链泳道">
+            <StorySwimlane storyId={ticket.id} />
+          </Card>
+        )}
+
+        {/* 卡6：spec 快照 */}
         <SpecCard ticket={ticket} onChanged={() => reload()} />
 
-        {/* 卡6：依赖与父子 */}
+        {/* 卡7：依赖与父子 */}
         <DependencyPanel
           ticket={ticket}
           children={detail.children}
@@ -177,7 +188,7 @@ export default function TicketDetailPage() {
           onChanged={() => reload()}
         />
 
-        {/* 卡7：留言 + 转移历史 */}
+        {/* 卡8：留言 + 转移历史 */}
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 16 }}>
           <CommentStream ticketId={ticket.id} comments={detail.comments} onSent={() => reload()} />
           <Timeline transitions={detail.transitions} />

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Card, Form, Input, Modal, Select, Space, Table, Typography } from 'antd';
-import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Button, Card, Select, Space, Table, Typography } from 'antd';
+import { ReloadOutlined } from '@ant-design/icons';
 import { Link, useNavigate } from 'react-router-dom';
-import { createTicket, listTickets } from '../api/tickets';
+import { listTickets } from '../api/tickets';
 import type { TicketListItem, TicketStatus, TicketType } from '../api/types';
 import StatusTag, { TypeTag, statusLabel, typeLabel } from '../components/StatusTag';
+import CreateTicketModal from '../components/CreateTicketModal';
 import { formatTime } from '../utils/format';
 
 /** 状态筛选项（S2a 八态全量） */
@@ -12,21 +13,12 @@ const STATUS_OPTIONS: { value: TicketStatus; label: string }[] = (
   ['DRAFT', 'SPEC_READY', 'DISPATCHED', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'CANCELLED', 'FAILED'] as TicketStatus[]
 ).map((s) => ({ value: s, label: statusLabel(s) }));
 
-/** 建单可选项（S1 起仅 STORY/TASK；BLOCKER 由卡点升级自动创建，DREAM 未启用） */
-const CREATABLE_TYPES: ('STORY' | 'TASK')[] = ['STORY', 'TASK'];
-
 /** 类型筛选项：建单全集 + BLOCKER（卡点队列入口，spec §5） */
 const TYPE_OPTIONS: { value: TicketType; label: string }[] = (
   ['STORY', 'TASK', 'BLOCKER'] as TicketType[]
 ).map((t) => ({ value: t, label: typeLabel(t) }));
 
-type CreateFormValues = {
-  type: 'STORY' | 'TASK';
-  title: string;
-  description?: string;
-  parentId?: number;
-};
-
+/** 全量列表页（兜底视图）：日常入口在工作台/仪表盘，本页保留完整表格与筛选 */
 export default function TicketListPage() {
   const navigate = useNavigate();
   const [items, setItems] = useState<TicketListItem[]>([]);
@@ -34,10 +26,6 @@ export default function TicketListPage() {
   const [statusFilter, setStatusFilter] = useState<TicketStatus | undefined>();
   const [typeFilter, setTypeFilter] = useState<TicketType | undefined>();
   const [createOpen, setCreateOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
-  // 父单候选（仅 STORY 可为父）
-  const [parentOptions, setParentOptions] = useState<TicketListItem[]>([]);
-  const [form] = Form.useForm<CreateFormValues>();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -55,37 +43,6 @@ export default function TicketListPage() {
     void load();
   }, [load]);
 
-  async function openCreate() {
-    // 加载 STORY 候选作父单选项（契约：parentId 指向的单必须为 STORY）
-    try {
-      const res = await listTickets({ type: 'STORY' });
-      setParentOptions(res.items);
-    } catch {
-      setParentOptions([]);
-    }
-    form.resetFields();
-    setCreateOpen(true);
-  }
-
-  async function handleCreate() {
-    const values = await form.validateFields();
-    setCreating(true);
-    try {
-      const ticket = await createTicket({
-        type: values.type,
-        title: values.title,
-        description: values.description?.trim() === '' ? undefined : values.description,
-        parentId: values.parentId,
-      });
-      setCreateOpen(false);
-      navigate(`/tickets/${ticket.id}`);
-    } catch {
-      // 错误已由 api 层统一 toast（如 parentId 非 STORY → DAG_INVALID）
-    } finally {
-      setCreating(false);
-    }
-  }
-
   return (
     <div style={{ padding: 24 }}>
       <Card
@@ -95,7 +52,7 @@ export default function TicketListPage() {
             <Button icon={<ReloadOutlined />} onClick={() => void load()}>
               刷新
             </Button>
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => void openCreate()}>
+            <Button type="primary" onClick={() => setCreateOpen(true)}>
               新建工单
             </Button>
           </Space>
@@ -171,34 +128,12 @@ export default function TicketListPage() {
         />
       </Card>
 
-      <Modal
-        title="新建工单"
+      {/* 建单弹窗与工作台共用（TASK 支持预绑定 worker） */}
+      <CreateTicketModal
         open={createOpen}
-        confirmLoading={creating}
-        okText="创建"
-        cancelText="取消"
-        onOk={() => void handleCreate()}
-        onCancel={() => setCreateOpen(false)}
-      >
-        <Form form={form} layout="vertical" initialValues={{ type: 'STORY' }}>
-          <Form.Item name="type" label="类型" rules={[{ required: true }]} tooltip="仅支持 STORY / TASK；STORY 可挂子单">
-            <Select options={CREATABLE_TYPES.map((t) => ({ value: t, label: typeLabel(t) }))} />
-          </Form.Item>
-          <Form.Item name="title" label="标题" rules={[{ required: true, message: '标题不能为空' }]}>
-            <Input placeholder="一句话说明这个工单" />
-          </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input.TextArea rows={3} placeholder="背景与验收要点（可选）" />
-          </Form.Item>
-          <Form.Item name="parentId" label="父单" tooltip="仅 STORY 可为父；父单将聚合子单状态（子单全 DONE/CANCELLED 才能关单）">
-            <Select
-              allowClear
-              placeholder="无（顶层工单）"
-              options={parentOptions.map((p) => ({ value: p.id, label: `#${p.id} ${p.title}` }))}
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
+        onClose={() => setCreateOpen(false)}
+        onCreated={(ticket) => navigate(`/tickets/${ticket.id}`)}
+      />
     </div>
   );
 }

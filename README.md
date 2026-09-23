@@ -26,10 +26,15 @@ pnpm install          # 安装全部 workspace 依赖
 pnpm dev              # 并行启动 server(3001) + web(5173)
 ```
 
-- 列表页：http://localhost:5173/tickets（状态/类型筛选；type=阻塞 = 卡点队列）
-- 详情页：列表行点击进入；状态操作/spec 冻结/依赖管理/留言/时间线均在详情页
-- TASK 执行链：放行时选 worker → 详情页「执行」卡看事件流尾部（执行中 5s 轮询）→
-  完成看「完成报告」卡（summary + commits）；卡点看「卡点处理」卡（裁决三选）
+- 工作台：http://localhost:5173/workbench（默认首页——新建单 / 阻塞与待裁决 / 待处理快捷操作）
+- 仪表盘：http://localhost:5173/dashboard（全局运行视图——进行中单 + 执行中 worker，点开直达日志页）
+- 列表页：http://localhost:5173/tickets（全量兜底视图；状态/类型筛选；type=阻塞 = 卡点队列）
+- 详情页：列表行点击进入；状态操作/spec 冻结/依赖管理/留言/时间线均在详情页；
+  STORY 详情含「编排链泳道」（子单依赖分层 DAG，执行中橙呼吸、完成绿）
+- TASK 执行链：放行（或建单预绑定 worker，依赖满足自动放行）→ 详情页「执行」卡看
+  状态/worker/轮次/时长 → 「查看日志」进独立日志页（轮次选择 + 全量事件流 + 原始 JSON 切换）
+  → 完成看「完成报告」卡（summary + commits）；卡点看「卡点处理」卡（裁决三选）；
+  终态 TASK 可「重新开单」（留言即本轮指令，原 worktree 续跑）
 - 开发库文件 `apps/server/data/atd.db`（gitignore，首次启动自动建表）
 
 ## 常用命令

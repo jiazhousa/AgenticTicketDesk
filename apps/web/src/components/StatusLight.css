@@ -1,0 +1,50 @@
+/* 呼吸灯动画：橙色强呼吸=执行中、青色轻呼吸=即将执行，其余状态常亮 */
+
+@keyframes atd-light-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 6px 1px var(--atd-light-color);
+  }
+  50% {
+    opacity: 0.25;
+    box-shadow: 0 0 1px 0 var(--atd-light-color);
+  }
+}
+
+@keyframes atd-light-pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 4px 0 var(--atd-light-color);
+  }
+  50% {
+    opacity: 0.5;
+    box-shadow: 0 0 1px 0 var(--atd-light-color);
+  }
+}
+
+.atd-light {
+  display: inline-block;
+  border-radius: 50%;
+  flex: none;
+  background: var(--atd-light-color);
+}
+
+/* 执行中：橙色呼吸（强） */
+.atd-light--pulse {
+  animation: atd-light-pulse 1.4s ease-in-out infinite;
+}
+
+/* 已派发：青色轻呼吸（即将执行） */
+.atd-light--pulse-soft {
+  animation: atd-light-pulse-soft 2.4s ease-in-out infinite;
+}
+
+/* 尊重系统级减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .atd-light--pulse,
+  .atd-light--pulse-soft {
+    animation: none;
+  }
+}

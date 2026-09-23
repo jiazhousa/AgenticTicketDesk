@@ -152,6 +152,8 @@ export interface UnifiedEvent {
   tool?: string;
   /** tool-result：工具执行出错标记 */
   errored?: boolean;
+  /** finish：进程正常结束标记 */
+  success?: boolean;
 }
 
 /** 执行日志响应（GET /api/tickets/:id/logs） */
@@ -177,6 +179,16 @@ export interface CreateTicketRequest {
   title: string;
   description?: string;
   parentId?: number;
+  /** 预绑定 worker（仅 TASK；编排链拆单场景——依赖满足后自动放行的前提） */
+  workerId?: string;
+}
+
+/** 终态重开请求（POST /api/tickets/:id/reopen）：留言即本轮指令，原 worktree 续跑 */
+export interface ReopenRequest {
+  /** 重开留言（必填，作为新一轮执行的最高优先指令） */
+  message: string;
+  /** 换 worker（可选；缺省沿用当前绑定） */
+  workerId?: string;
 }
 
 /** 编辑请求（§3.4：仅 DRAFT 态可用，至少一项） */

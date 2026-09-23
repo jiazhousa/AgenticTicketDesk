@@ -8,6 +8,7 @@ import type {
   ApiErrorBody,
   CreateTicketRequest,
   LogsResponse,
+  ReopenRequest,
   ResolveBlockerRequest,
   Ticket,
   TicketComment,
@@ -73,6 +74,18 @@ async function request<T>(
 /** §3.1 POST /api/tickets —— 建单（S1 仅 STORY/TASK），返回 201 Ticket */
 export function createTicket(req: CreateTicketRequest): Promise<Ticket> {
   return request<Ticket>('/api/tickets', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  });
+}
+
+/**
+ * POST /api/tickets/:id/reopen —— 终态重开（仅 TASK 终态单）。
+ * 留言即本轮指令（原 worktree 续跑）；可选换 worker。
+ * 返回重开后的工单（DISPATCHED，自动派发）。
+ */
+export function reopenTicket(id: number, req: ReopenRequest): Promise<Ticket> {
+  return request<Ticket>(`/api/tickets/${id}/reopen`, {
     method: 'POST',
     body: JSON.stringify(req),
   });

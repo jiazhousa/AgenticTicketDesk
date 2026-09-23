@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { Button, Input, Modal, Space, Typography } from 'antd';
+import { RedoOutlined } from '@ant-design/icons';
 import { submitSpec, transitionTicket } from '../api/tickets';
 import type { Ticket, TicketStatus, TicketType } from '../api/types';
 import { statusLabel } from './StatusTag';
 import DispatchForm from './DispatchForm';
+import ReopenModal from './ReopenModal';
 
 /**
  * 状态操作区：按当前态与工单类型渲染（转移通道二分，与 server 状态机同步）。
@@ -12,7 +14,8 @@ import DispatchForm from './DispatchForm';
  * - TASK（执行单）：仅 user 白名单边——放行派发（需选 worker，走 DispatchForm）/ 取消；
  *   执行推进边（开始/完成/转阻塞/失败）由 dispatcher system 通道自动流转，user 请求 → 422 MANUAL_FORBIDDEN
  * - BLOCKER：不提供常规转移（关单走卡点裁决，见 BlockerCard）
- * - 终态（DONE/CANCELLED/FAILED）无出边，不渲染按钮
+ * - 终态 TASK：「重新开单」（留言即本轮指令，原 worktree 续跑，走 /reopen 端点）
+ * - 终态（DONE/CANCELLED/FAILED）STORY 无出边，不渲染按钮
  * 服务端 422（非法转移/门禁未过/越权手推）的 message 已由 api 层统一 toast 原样透出。
  */
 
@@ -57,8 +60,8 @@ const ACTION_LABEL: Partial<Record<TicketStatus, string>> = {
 };
 
 export default function TransitionActions({ ticket, onChanged }: { ticket: Ticket; onChanged: () => void }) {
-  // 弹窗状态：null=关闭；'spec'=提交 spec；'dispatch'=TASK 放行（DispatchForm）；{to}=普通状态转移
-  const [modal, setModal] = useState<null | 'spec' | 'dispatch' | { to: TicketStatus }>(null);
+  // 弹窗状态：null=关闭；'spec'=提交 spec；'dispatch'=TASK 放行（DispatchForm）；'reopen'=终态重开（ReopenModal）；{to}=普通状态转移
+  const [modal, setModal] = useState<null | 'spec' | 'dispatch' | 'reopen' | { to: TicketStatus }>(null);
   const [specContent, setSpecContent] = useState('');
   const [note, setNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -83,8 +86,8 @@ export default function TransitionActions({ ticket, onChanged }: { ticket: Ticke
     try {
       if (modal === 'spec') {
         await submitSpec(ticket.id, specContent.trim());
-      } else if (modal && modal !== 'dispatch') {
-        // 此处 modal 已窄化为 { to }（'spec' 分支已处理，'dispatch' 由 DispatchForm 自管提交）
+      } else if (modal && modal !== 'dispatch' && modal !== 'reopen') {
+        // 此处 modal 已窄化为 { to }（'spec'/'dispatch'/'reopen' 各自弹层独立处理）
         const trimmed = note.trim();
         await transitionTicket(ticket.id, modal.to, trimmed === '' ? undefined : trimmed);
       }
@@ -124,8 +127,13 @@ export default function TransitionActions({ ticket, onChanged }: { ticket: Ticke
       {isTerminal && ticket.type === 'BLOCKER' && (
         <Typography.Text type="secondary">本单为卡点单，关单通过「卡点处理」区的裁决完成</Typography.Text>
       )}
-      {isTerminal && ticket.type !== 'BLOCKER' && (
-        <Typography.Text type="secondary">终态，无可用操作</Typography.Text>
+      {isTerminal && ticket.type === 'TASK' && (
+        <Button icon={<RedoOutlined />} onClick={() => setModal('reopen')}>
+          重新开单
+        </Button>
+      )}
+      {isTerminal && ticket.type === 'STORY' && (
+        <Typography.Text type="secondary">终态，无可用操作（如需重做请新建工单）</Typography.Text>
       )}
       {autoAdvancing && (
         <Typography.Text type="secondary">执行由 worker 自动推进（进行中 → 完成 / 阻塞 / 失败）</Typography.Text>
@@ -161,8 +169,16 @@ export default function TransitionActions({ ticket, onChanged }: { ticket: Ticke
         onChanged={onChanged}
       />
 
+      {/* 终态 TASK 重开弹层：留言即本轮指令 + 可选换 worker（原 worktree 续跑） */}
+      <ReopenModal
+        ticket={ticket}
+        open={modal === 'reopen'}
+        onClose={() => setModal(null)}
+        onChanged={onChanged}
+      />
+
       {/* 状态转移弹窗：note 可选 */}
-      {modal && modal !== 'spec' && modal !== 'dispatch' && (
+      {modal && modal !== 'spec' && modal !== 'dispatch' && modal !== 'reopen' && (
         <Modal
           title={`确认转移 —— ${statusLabel(ticket.status)} → ${statusLabel(modal.to)}`}
           open
