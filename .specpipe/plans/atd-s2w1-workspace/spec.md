@@ -30,7 +30,8 @@ ATD 终态定位是**多项目迭代面板**——通过 ATD 对任意项目群�
 
 ### FR-2 缺省 workspace 与零迁移兼容
 - 无 `workspaces/` 目录（或目录为空）时：自动合成 **default workspace**（主仓=config.repoPath），日志留痕
-- 存量工单（含 S2a 数据）自动归属 default workspace，**无任何数据迁移脚本**；既有 API 不传 workspace 参数时行为与 S2a 完全一致（回归保证：S2a 全部测试在无 workspaces/ 目录环境下原样通过）
+- **DB 侧 `workspaceId` 列 NULL 语义=default workspace**（合成或显式声明 id=default 者皆可承载）：存量工单不迁移、不改行，运行时解析归属；既有 API 不传 workspace 参数时行为与 S2a 完全一致（回归保证：S2a 全部测试在无 workspaces/ 目录环境下原样通过）
+- `repoRef` 建单后**不可变**（worktree/分支/日志已绑定仓；重开与改派均沿用原仓）
 
 ### FR-3 工单挂载 workspace
 - 建单 API 新增可选 `workspaceId`（缺省=default）；STORY/TASK/BLOCKER 均挂 workspace
