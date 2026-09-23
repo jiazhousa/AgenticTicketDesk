@@ -37,7 +37,7 @@ id: opencode            # 唯一标识
 name: OpenCode          # 展示名
 protocol: spawn-cli     # S2a 仅实现 spawn-cli
 capabilities: [task]    # interactive 随 S2b
-command: opencode run --format json --dir {{worktree}} {{prompt}}
+command: opencode run --standalone --format json {{prompt}}
 timeoutMin: 30          # 超时 → 杀进程树 → FAILED
 ```
 
@@ -61,7 +61,7 @@ timeoutMin: 30          # 超时 → 杀进程树 → FAILED
 | 进程退出（code=0） | finish(success) |
 
 - 每轮 spawn 独立日志对：`data/logs/t{id}.r{n}.raw.jsonl` / `.events.jsonl`（n=执行轮次，首轮 1；**append 不覆盖**，MUST-5）；**raw 首行为执行元数据**（命令/env 注入摘要/基线 HEAD/轮次/timeoutMin——MUST-2 审计载体：permission 注入内容可见）；工单详情轮次列表可查
-- 退出码非 0 / stdout 无 finish 语义 → 执行失败（按 §3.7 判定表分流）
+- 退出码非 0 → FAILED（崩溃不重试）；退出码 0 时以报告文件为准（stdout finish 事件由编排层补记留痕、仅审计用途——B6 锚点依赖此口径）
 
 ### 3.3 opencode 原生事件形态（实测样本，解析依据）
 

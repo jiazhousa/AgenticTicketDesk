@@ -15,7 +15,7 @@
 | 新包 | `packages/worker-core`（`@atd/worker-core`）/ `packages/worker-opencode`（`@atd/worker-opencode`）；server 依赖两者 |
 | spawn | `spawn(cmd, args[], { cwd: worktree, env, detached: true })` 参数数组；**模板先按空白拆 token 再整体替换变量**（值含空格不二次拆分）；超时杀进程组 `process.kill(-pid)` SIGTERM→3s→SIGKILL |
 | 执行模型 | server 单进程内存调度 `Map<ticketId, RunningRound>`；无队列（S3 池化）；重启恢复按 spec §4 |
-| **opencode 权限注入（r1-H1 修正）** | 配置内容为**对象形态**：`{"permission":{"bash":{"*":"ask","git push":"deny","git push *":"deny","git remote *":"deny","gh *pr*create*":"deny"}}}`（catch-all 在前、last-match-wins）。注入通道：**主用 `OPENCODE_CONFIG_CONTENT`（内联 JSON，优先级最高不被 project config 覆盖）**；`OPENCODE_CONFIG` 文件路径仅作 fallback（Builder 实测两键行为，结论记 impl 修订）。注入摘要（键名+deny 规则集）写 raw 首行 |
+| **opencode 权限注入（r1-H1 修正）** | 配置内容为**对象形态**：`{"permission":{"bash":{"*":"allow","git push":"deny","git push *":"deny","git remote *":"deny","gh *pr*create*":"deny"}}}`（catch-all 在前、last-match-wins）。注入通道：**主用 `OPENCODE_CONFIG_CONTENT`（内联 JSON，优先级最高不被 project config 覆盖）**；`OPENCODE_CONFIG` 文件路径仅作 fallback（Builder 实测两键行为，结论记 impl 修订）。注入摘要（键名+deny 规则集）写 raw 首行 |
 | 超时可测性（r1-M2） | profile `timeoutMin` 正常语义；dispatcher 构造参数 `timeoutOverrideMs`（仅测试注入）。B5：fake-sleep + override 300ms |
 | 测试策略 | **fake profile 为主**（node fixture 脚本全场景，不依赖 opencode）；真跑留 Oracle 收尾（B1 实证） |
 | git 操作 | `execFileSync('git', [...])` 直调 |
