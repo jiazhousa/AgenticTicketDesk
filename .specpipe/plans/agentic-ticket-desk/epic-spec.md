@@ -119,7 +119,7 @@ ATD 终态是**多项目迭代面板**（不只开发 ATD 自身）——Workspa
 | repos | `[{id, path, role: primary|readable}]`——**primary 主仓**（工单缺省目标，HumanThink 会话 cwd）；readable 可读仓（编排 agent 调研范围白名单） |
 | 可读范围控制 | workspace.repos 即白名单：编排 agent（S2b1 interactive 实例权限注入）与 worker 执行的目标仓都必须 ∈ workspace 声明 |
 | 工单挂载 | 工单必属一个 workspace；TASK 可指定目标仓 repoRef（缺省=主仓）——跨仓 Story 的 Task 链基础（如「三仓修改并行→链路测试→MR」） |
-| 向后兼容 | 无 workspaces/ 目录时自动合成 default workspace（主仓=config.repoPath）——S2a 单仓形态零迁移 |
+| 向后兼容 | 仓内自带 `workspaces/atd.yaml`（ATD 即普通 workspace，兼模板）；存量工单经 migration DEFAULT 归属 atd；无 workspaces/ 目录=启动失败提示初始化（本地系统不兜底合成） |
 | 知识库挂载点 | workspace 维度的知识目录（AGENTS.md/spec 归档/审计沉淀，§4.5），S4 落地 |
 
 
