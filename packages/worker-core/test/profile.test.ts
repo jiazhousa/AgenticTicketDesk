@@ -7,7 +7,7 @@ const LEGAL = [
   'name: Fake',
   'protocol: spawn-cli',
   'capabilities: [task]',
-  'command: opencode run --format json --dir {{worktree}} {{prompt}}',
+  'command: opencode run --standalone --format json {{prompt}}',
   'timeoutMin: 30',
 ].join('\n');
 
@@ -48,8 +48,8 @@ describe('WorkerProfile 注册防护【B7】', () => {
   });
 
   test('schema 缺字段 → 拒绝且报错含字段名', () => {
-    const yaml = LEGAL.replace('\ntimeoutMin: 30', '');
-    expect(() => validateProfile(yaml, 'missing.yaml')).toThrowError(/timeoutMin/);
+    const yaml = LEGAL.replace('\nprotocol: spawn-cli', '');
+    expect(() => validateProfile(yaml, 'missing.yaml')).toThrowError(/protocol/);
   });
 
   test('协议不识别（非 spawn-cli）→ 拒绝', () => {

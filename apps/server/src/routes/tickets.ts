@@ -90,12 +90,13 @@ export function registerTicketRoutes(
     const workerName = detail.ticket.workerId != null
       ? (runtime?.registry.get(detail.ticket.workerId)?.name ?? null)
       : null;
-    // execution.startedAt=最近一次进入 IN_PROGRESS 的转移时间（即当前/最近轮 spawn 时间）
+    // execution 仅在执行相关态（DISPATCHED/IN_PROGRESS）返回——终态单不携带（前端以 execution 判执行中）
+    const activeExec = detail.ticket.status === 'DISPATCHED' || detail.ticket.status === 'IN_PROGRESS';
     const enterExec = [...detail.transitions].reverse().find((t) => t.toStatus === 'IN_PROGRESS');
     return {
       ...detail,
       workerName,
-      execution: enterExec ? { startedAt: enterExec.createdAt } : null,
+      execution: activeExec && enterExec ? { startedAt: enterExec.createdAt } : null,
     };
   });
 

@@ -194,6 +194,15 @@ describe('B3：卡点三裁决（BLOCK_MODE 参数化分轮）', () => {
 });
 
 describe('B4：崩溃——退出码非 0 → FAILED + 双 JSONL + 注入摘要', () => {
+  test('spawn 命令不存在 → pre-spawn 路径 CANCELLED 可重派（不落 FAILED 终态）', async () => {
+    const ctx = createRealContext({ autoDispatch: true, profiles: [{ id: 'ghost', command: 'nonexistent-cmd-atd-xyz {{prompt}}' }] });
+    const id = await dispatchTicket(ctx, 'ghost');
+    await waitStatus(ctx, id, ['CANCELLED']);
+    const detail = ctx.service.getTicketDetail(id);
+    const lastComment = detail.comments.at(-1);
+    expect(lastComment?.content).toContain('无法启动');
+  });
+
   test('fake-crash 全链', async () => {
     const ctx = createRealContext({ autoDispatch: true, profiles: [{ id: 'fc', command: fixtureCmd('fake-crash.mjs') }] });
     const id = await dispatchTicket(ctx, 'fc');

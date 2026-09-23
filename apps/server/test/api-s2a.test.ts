@@ -105,10 +105,31 @@ describe('GET /api/tickets/:id 详情聚合扩展', () => {
     expect(body.ticket.pendingLabel).toBeNull();
     expect(body.ticket.workerId).toBe('fake');
     expect(body.workerName).toBe('Fake');
-    expect(typeof body.execution?.startedAt).toBe('number');
+    // 终态（DONE）不携带 execution——前端以其判执行中，终态必须 null
+    expect(body.execution).toBeNull();
     expect(body.commits).toEqual([{ round: 1, sha: 'deadbeefdeadbeef' }]);
     expect(body.report).toEqual({ round: 1, status: 'done', summary: '测试摘要', blockReason: null });
     expect(body.blocker).toBeNull();
+  });
+
+  test('执行中（IN_PROGRESS）携带 execution；BLOCKER 详情 blocks 反查父单', async () => {
+    const ctx = createTestContext();
+    const t = ctx.service.createTicket({ type: 'TASK', title: '执行中单' });
+    ctx.service.submitSpec(t.id, '# spec');
+    ctx.service.transition(t.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    ctx.service.transition(t.id, 'IN_PROGRESS', { actor: 'system', round: 1 });
+    const res = await ctx.app.inject({ method: 'GET', url: `/api/tickets/${t.id}` });
+    expect(res.json().execution?.startedAt).toEqual(expect.any(Number));
+
+    // BLOCKER：造父单 BLOCKED + BLOCKER 子单 → BLOCKER 详情 blocks 含父单
+    const parent = ctx.service.createTicket({ type: 'TASK', title: '卡点父单' });
+    ctx.service.submitSpec(parent.id, '# spec');
+    ctx.service.transition(parent.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    ctx.service.transition(parent.id, 'IN_PROGRESS', { actor: 'system', round: 1 });
+    ctx.service.transition(parent.id, 'BLOCKED', { actor: 'system', note: '升级' });
+    const blocker = ctx.service.createBlocker({ parentTicketId: parent.id, reason: '上下文' });
+    const bRes = await ctx.app.inject({ method: 'GET', url: `/api/tickets/${blocker.id}` });
+    expect(bRes.json().blocks.map((x: { id: number }) => x.id)).toContain(parent.id);
   });
 
   test('BLOCKED 单透出 pendingLabel=l3 与未关 BLOCKER', async () => {

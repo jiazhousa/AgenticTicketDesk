@@ -59,6 +59,7 @@ export type TicketDetail = {
   ticket: Ticket;
   children: Ticket[];
   dependencies: Ticket[];
+  blocks: Ticket[];
   comments: Comment[];
   transitions: Transition[];
   hasCancelledChildren: boolean;
@@ -222,6 +223,15 @@ export class TicketService {
       .orderBy(asc(ticketDependencies.id))
       .all()
       .map((r) => toTicket(r.t));
+    // 反向查询：本单阻塞了哪些单（BLOCKER 单详情的父单入口数据源）
+    const blocks = this.db
+      .select({ t: tickets })
+      .from(ticketDependencies)
+      .innerJoin(tickets, eq(ticketDependencies.ticketId, tickets.id))
+      .where(eq(ticketDependencies.blockedByTicketId, id))
+      .orderBy(asc(ticketDependencies.id))
+      .all()
+      .map((r) => toTicket(r.t));
     const commentRows = this.db
       .select()
       .from(comments)
@@ -273,6 +283,7 @@ export class TicketService {
         toStatus: r.toStatus as Status,
       })),
       hasCancelledChildren: children.some((c) => c.status === 'CANCELLED'),
+      blocks,
       commits,
       report: reportRow
         ? {

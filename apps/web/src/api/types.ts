@@ -77,6 +77,7 @@ export interface TicketDetail {
   children: Ticket[];
   /** blockedBy 指向的依赖单列表 */
   dependencies: Ticket[];
+  blocks: Ticket[];
   /** 时间正序留言 */
   comments: TicketComment[];
   /** 转移历史（时间线数据源） */

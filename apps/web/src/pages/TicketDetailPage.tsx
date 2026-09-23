@@ -74,7 +74,7 @@ export default function TicketDetailPage() {
     );
   }
 
-  const { ticket } = detail;
+  const { ticket, blocks } = detail;
 
   return (
     <div style={{ padding: 24 }}>
@@ -163,7 +163,7 @@ export default function TicketDetailPage() {
 
         {/* 卡4：卡点处理——BLOCKER 单自身视角（resolve 入口） */}
         {ticket.type === 'BLOCKER' && ticket.status === 'IN_PROGRESS' && (
-          <BlockerCard blocker={ticket} parentTicketId={ticket.parentId ?? undefined} onChanged={() => reload()} />
+          <BlockerCard blocker={ticket} parentTicketId={blocks[0]?.id} onChanged={() => reload()} />
         )}
 
         {/* 卡5：spec 快照 */}

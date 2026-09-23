@@ -15,7 +15,7 @@ export const workerProfileSchema = z.object({
   /** 命令模板：{{worktree}} / {{prompt}} 由编排层以参数数组整体替换（不经 shell，无注入面） */
   command: z.string().min(1),
   /** 单轮执行超时（分钟），超时杀进程树 */
-  timeoutMin: z.number().int().positive(),
+  timeoutMin: z.number().int().positive().optional(),
 });
 
 export type WorkerProfile = z.infer<typeof workerProfileSchema>;

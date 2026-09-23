@@ -105,7 +105,9 @@ export class Dispatcher {
         OPENCODE_CONFIG_CONTENT: permJson,
         OPENCODE_CONFIG: permFile,
       };
-      const timeoutMs = this.deps.timeoutOverrideMs ?? profile.timeoutMin * 60_000;
+      // profile.timeoutMin 缺省回退 config.defaultTimeoutMin
+      const timeoutMs = this.deps.timeoutOverrideMs
+        ?? (profile.timeoutMin ?? this.deps.config.defaultTimeoutMin) * 60_000;
       const rawPath = path.join(logsDir, `t${ticketId}.r${round}.raw.jsonl`);
       const eventsPath = path.join(logsDir, `t${ticketId}.r${round}.events.jsonl`);
 
@@ -130,6 +132,13 @@ export class Dispatcher {
         },
         timeoutMs,
       });
+
+      // spawn 发起失败（进程从未存在，如命令不存在/无执行权限）：pre-spawn 路径（spec §4）——
+      // DISPATCHED→CANCELLED 可重新放行，不落 FAILED 终态
+      if (run.pid == null || run.pid <= 0) {
+        this.preSpawnFail(ticketId, new Error(`worker 进程无法启动：${argv[0]}（命令不存在或无执行权限）`));
+        return false;
+      }
 
       // 步 4：spawn 发起成功即进入执行态（round 写入）
       if (ticket.status === 'DISPATCHED') {
