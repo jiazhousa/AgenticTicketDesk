@@ -18,6 +18,9 @@ import type {
   TicketType,
   UpdateTicketRequest,
   WorkerInfo,
+  Workspace,
+  WorkspaceDetailResponse,
+  WorkspacesResponse,
 } from './types';
 
 /** 携带契约错误码的请求异常（code 见 impl §2.4 错误码全集） */
@@ -91,13 +94,14 @@ export function reopenTicket(id: number, req: ReopenRequest): Promise<Ticket> {
   });
 }
 
-/** §3.2 GET /api/tickets?status=&type= —— 列表（默认 createdAt DESC），含父子摘要 */
+/** §3.2 GET /api/tickets?status=&type=&workspaceId= —— 列表（默认 createdAt DESC），含父子摘要；workspaceId 不传=全量 */
 export async function listTickets(
-  params: { status?: TicketStatus; type?: TicketType } = {},
+  params: { status?: TicketStatus; type?: TicketType; workspaceId?: string } = {},
 ): Promise<{ items: TicketListItem[] }> {
   const qs = new URLSearchParams();
   if (params.status) qs.set('status', params.status);
   if (params.type) qs.set('type', params.type);
+  if (params.workspaceId) qs.set('workspaceId', params.workspaceId);
   const suffix = qs.toString() !== '' ? `?${qs.toString()}` : '';
   return request<{ items: TicketListItem[] }>(`/api/tickets${suffix}`);
 }
@@ -162,6 +166,21 @@ export function removeDependency(id: number, blockedById: number): Promise<void>
 /** GET /api/workers —— Registry worker 档案列表（放行/改派选择数据源） */
 export function getWorkers(): Promise<WorkerInfo[]> {
   return request<WorkerInfo[]>('/api/workers');
+}
+
+/**
+ * GET /api/workspaces —— workspace 列表（含 repos 明细/主仓标识/工单计数）。
+ * 响应体 `{ workspaces: [...] }` 在此解包，调用方直接拿数组。
+ */
+export async function listWorkspaces(): Promise<Workspace[]> {
+  const res = await request<WorkspacesResponse>('/api/workspaces');
+  return res.workspaces;
+}
+
+/** GET /api/workspaces/:id —— workspace 详情（未知 id → 404）；响应体 `{ workspace }` 在此解包 */
+export async function getWorkspace(id: string): Promise<Workspace> {
+  const res = await request<WorkspaceDetailResponse>(`/api/workspaces/${encodeURIComponent(id)}`);
+  return res.workspace;
 }
 
 /**

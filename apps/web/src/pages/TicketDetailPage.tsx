@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Card, Descriptions, Space, Spin, Typography } from 'antd';
+import { Alert, Button, Card, Descriptions, Space, Spin, Tag, Typography } from 'antd';
 import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { getTicket } from '../api/tickets';
 import type { TicketDetail } from '../api/types';
 import StatusTag, { TypeTag } from '../components/StatusTag';
+import { resolveRepoRefLabel } from '../components/RepoRefTag';
 import TransitionActions from '../components/TransitionActions';
 import SpecCard from '../components/SpecCard';
 import DependencyPanel from '../components/DependencyPanel';
@@ -15,6 +16,7 @@ import StorySwimlane from '../components/StorySwimlane';
 import ReportCard from '../components/ReportCard';
 import BlockerCard from '../components/BlockerCard';
 import { formatTime } from '../utils/format';
+import { useWorkspaceMap } from '../utils/workspace';
 
 /**
  * 工单详情页（验收反馈后瘦身）：执行卡只留 状态/worker/轮次/时长 + 日志入口——
@@ -27,6 +29,8 @@ export default function TicketDetailPage() {
   const params = useParams<{ id: string }>();
   const navigate = useNavigate();
   const ticketId = Number(params.id);
+  // workspace 索引（本单所属 workspace 的主仓判定/名称展示；yaml 静态声明，模块级缓存直查）
+  const workspaceMap = useWorkspaceMap();
   const [detail, setDetail] = useState<TicketDetail | null>(null);
   const [loading, setLoading] = useState(false);
   // 加载失败且无缓存数据时显示空态（有缓存时保留旧数据，错误已 toast）
@@ -111,6 +115,22 @@ export default function TicketDetailPage() {
             <Descriptions.Item label="单号">#{ticket.id}</Descriptions.Item>
             <Descriptions.Item label="类型"><TypeTag type={ticket.type} /></Descriptions.Item>
             <Descriptions.Item label="状态"><StatusTag status={ticket.status} /></Descriptions.Item>
+            <Descriptions.Item label="工作空间">
+              {(() => {
+                const ws = workspaceMap?.get(ticket.workspaceId);
+                return ws != null ? `${ws.name}（${ws.id}）` : ticket.workspaceId;
+              })()}
+            </Descriptions.Item>
+            {ticket.type === 'TASK' && ticket.repoRef != null && (
+              // 目标仓：非主仓 geekblue Tag 醒目；主仓普通文本（建单后不可变）
+              <Descriptions.Item label="目标仓">
+                {resolveRepoRefLabel(ticket, workspaceMap) != null ? (
+                  <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>{ticket.repoRef}</Tag>
+                ) : (
+                  <Typography.Text>{ticket.repoRef}（主仓）</Typography.Text>
+                )}
+              </Descriptions.Item>
+            )}
             <Descriptions.Item label="创建时间">{formatTime(ticket.createdAt)}</Descriptions.Item>
             <Descriptions.Item label="更新时间">{formatTime(ticket.updatedAt)}</Descriptions.Item>
             <Descriptions.Item label="worker">
