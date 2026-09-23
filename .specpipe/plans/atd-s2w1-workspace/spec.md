@@ -1,7 +1,7 @@
 # S2w1：Workspace 多项目基座 — spec
 
 - **Story**：atd-s2w1-workspace（Epic §4.6 / §9 路线图）
-- **状态**：v1（2026-09-24）
+- **状态**：v2（2026-09-24，r1 修订：default 恒注册/归属传播/契约补全）
 - **上游依赖**：S2a（已 DONE 合 main）
 
 ## 1. 背景与目标
@@ -53,7 +53,7 @@ ATD 终态定位是**多项目迭代面板**——通过 ATD 对任意项目群�
 ### FR-6 前端
 - 顶栏新增 **workspace 切换器**（下拉：显示名+主仓名；isDefault 者标注「缺省」）；切换后列表/工作台/仪表盘按所选 workspace 过滤（全局状态；「全部」选项保留，「全部」视图下建单 workspaceId 缺省=default）
 - 建单弹窗（共享 CreateTicketModal）：workspace 选择后 TASK 新增**目标仓下拉**（所选 workspace 的 repos，主仓缺省标注「主」；父单候选随所选 workspace 过滤）；仅单仓 workspace 时也展示，保持一致心智
-- 详情页/列表行：显示目标仓名（非主仓时醒目，主仓可省略）；列表筛选器新增 workspace 列（多 workspace 时）
+- 详情页/列表行：显示目标仓名（非主仓时醒目，主仓可省略）；workspace 维度过滤**统一收口顶栏切换器**（列表筛选器不新增 workspace 列，避免双控件交互歧义）
 
 ## 4. 兼容矩阵（验收口径）
 
