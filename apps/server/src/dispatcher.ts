@@ -324,7 +324,8 @@ export class Dispatcher {
     if (!blockerRow || blockerRow.type !== 'BLOCKER') {
       throw new AppError('RESOLUTION_INVALID', `卡点单不存在或不是 BLOCKER：#${blockerId}`);
     }
-    if (blockerRow.status !== 'BLOCKED') {
+    // BLOCKED=现口径；IN_PROGRESS=历史卡点单兼容（修复前创建，裁决后自然消化）
+    if (blockerRow.status !== 'BLOCKED' && blockerRow.status !== 'IN_PROGRESS') {
       throw new AppError('RESOLUTION_INVALID', `卡点单已关（当前 ${blockerRow.status}）：#${blockerId}`);
     }
     // 父单=被该 BLOCKER 阻塞的单（依赖行：父.id blockedBy blocker.id）
