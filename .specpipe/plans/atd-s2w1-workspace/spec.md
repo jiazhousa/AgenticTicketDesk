@@ -34,7 +34,7 @@ ATD 终态定位是**多项目迭代面板**——通过 ATD 对任意项目群�
 - `repoRef` 建单后**不可变**（worktree/分支/日志已绑定仓；重开与改派均沿用原仓）
 
 ### FR-3 工单挂载 workspace
-- 建单 API 新增可选 `workspaceId`（缺省=default；未知 id → 422 指明可选集）；STORY/TASK/BLOCKER 均挂 workspace
+- 建单 API 新增可选 `workspaceId`（缺省=atd；未知 id → 422 WORKSPACE_UNKNOWN）；STORY/TASK/BLOCKER 均挂 workspace
 - **归属传播**：带 parentId 的 TASK 强制继承父单 workspace（显式传入不同值 → 422）；BLOCKER 自动创建时继承父单 workspace
 - **同 workspace 约束**：parentId 边与 blockedBy 边均限同 workspace（跨 workspace 挂父子/依赖 → 422 指明两侧 workspace）
 - 列表/工作台/仪表盘 API 新增可选 `workspaceId` 过滤；不传=全量（兼容）

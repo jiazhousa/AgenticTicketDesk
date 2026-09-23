@@ -13,7 +13,7 @@ workspace 一等实体落地：声明式加载（workspaces/*.yaml）+ 工单挂
 | 文件 | 改动 |
 |---|---|
 | `workspaces/atd.yaml` | **新增**（仓内自带）：id=atd、name=ATD、repos=[{id: atd, path: ., role: primary}] |
-| `apps/server/src/workspaces.ts` | **新增** WorkspaceRegistry：加载 workspaces/*.yaml + zod 校验（id kebab-case 唯一/repos id 唯一/primary 恰一/path 存在）+ 查询（list/get/resolveRepo(workspaceId, repoRef?)→绝对路径）；无目录→启动失败（错误含模板指引） |
+| `apps/server/src/workspaces.ts` | **新增** WorkspaceRegistry：加载 workspaces/*.yaml + zod 校验（id kebab-case 唯一/repos id 唯一/primary 恰一/path 存在）+ 查询（list/get/resolveRepo(workspaceId, repoRef?)→绝对路径）；path 解析基准=repoRoot（相对）或 `~` 展开（与 config.yaml 同规则）；无目录→启动失败（错误含模板指引） |
 | `apps/server/src/config.ts` | repoPath 字段转 **optional**（atd.yaml 承担主仓声明）；其余不动 |
 | `apps/server/src/db/schema.ts` | tickets 加 `workspaceId`（text, **NOT NULL DEFAULT 'atd'**）、`repoRef`（text, nullable——BLOCKER/STORY 无仓语义） |
 | `apps/server/drizzle/0002_s2w1.sql` | **新增** migration：`ALTER TABLE tickets ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'atd'`（**存量行由 DEFAULT 自动归属 atd，无需 UPDATE**——SQLite ADD COLUMN NOT NULL DEFAULT 语义）+ repo_ref 列 ADD COLUMN NULL；drizzle meta/_journal 同步 |
@@ -41,7 +41,7 @@ workspace 一等实体落地：声明式加载（workspaces/*.yaml）+ 工单挂
 - 自验：`pnpm -F @atd/server exec tsc --noEmit && pnpm -F @atd/server test`
 - **helpers.ts 改造**（测试基建，随块 A）：createTestContext/createRealContext 构造 fixture workspaces 目录（临时目录写入 atd.yaml + 按需双仓 yaml），loadWorkspaces 加载后注入 service/dispatcher；worktreeGuard 维持 skip。**既有 worktree/dispatcher 测试文件因 allocate 等签名变更需同步适配**（tsconfig include test，编译期即暴露——不是「原样跑」，是「适配后语义等价」）
 - 新增测试（vitest，沿用 createTestContext/createRealContext 模式）：
-  1. workspaces 加载：合法双仓 yaml 解析正确；path 不存在/双 primary/repo id 重复/ws id 重复/无目录 → 加载失败信息含文件名
+  1. workspaces 加载：合法双仓 yaml 解析正确；path 不存在/双 primary/repo id 重复/ws id 重复/无目录 → 加载失败信息含文件名；相对 path（基于 repoRoot）与 `~` 展开两种形态解析正确
   2. 建单契约：workspaceId 未知 422 WORKSPACE_UNKNOWN；repoRef 非 TASK 拒；repoRef ∉ repos 422 REPO_REF_INVALID（details 含可选集）；parentId 强制继承（异值 422 CROSS_WORKSPACE）
   3. addDependency 跨 workspace 422 CROSS_WORKSPACE
   4. 放行复校（user 通道）：建单后**替换注入的 registry 实例**（模拟 yaml 漂移——移除该 repo）→ 放行 422 REPO_REF_DRIFTED
@@ -76,7 +76,7 @@ workspace 一等实体落地：声明式加载（workspaces/*.yaml）+ 工单挂
 
 - **D1 WorktreeManager 参数化而非多实例**：allocate/reclaim/assertReady/pathFor 加 repoPath 参数。**调用方三处**：dispatcher（spawn 链）、guards（放行四件套经 DispatchGuards）、routes/execution.ts（reclaim）。避免 manager 池生命周期管理。
 - **D2 registry 注入 TicketService 必选**（构造参数）：测试 fixture 与生产统一走 loadWorkspaces 产物——helpers 构造临时 workspaces 目录（最小内容=atd.yaml 指向 dummy repo 路径），不存在「无 registry」分支。config.repoPath 转 optional 后**不再参与装配**（主仓声明唯一来源=workspaces yaml；内置兜底仅存在于 loadWorkspaces 的文档指引）。
-- **D3 workspace_id 列 NOT NULL DEFAULT 'atd'**：SQLite ADD COLUMN ... NOT NULL DEFAULT 对存量行自动填值——零 UPDATE、迁移一步到位（0001_s2a.sql 的 pending_label DEFAULT 先例同款）。repo_ref 可空（非 TASK 无仓语义）。
+- **D3 workspace_id 列 NOT NULL DEFAULT 'atd'**：SQLite ADD COLUMN ... NOT NULL DEFAULT 对存量行自动填值——零 UPDATE、迁移一步到位（0001_s2a.sql 的 pending_label DEFAULT 先例同款）。repo_ref 可空（非 TASK 无仓语义）。**对 spec FR-2「日志留痕」的显式豁免**：归属动作由 migration DEFAULT 原子完成（优于启动期 UPDATE+日志的时序窗口）；启动时打印一次 migration 摘要（drizzle 既有输出）即为留痕载体。
 - **D4 guards.assertWorktreeReady 签名扩展**：接收（id, repoPath）——放行四件套在 service 内做 repoRef 复校 + worktree 前置沿用现有 hook。
 - **D5 前端「全部」视图建单缺省 atd**：与 API 缺省一致（spec FR-6），弹窗内显式可选覆写。
 - **D6 workspaces/*.yaml 加载失败即启动失败**：不降级（spec FR-1，本地系统快速失败）；错误信息含「参照仓内 workspaces/atd.yaml 模板」指引。
