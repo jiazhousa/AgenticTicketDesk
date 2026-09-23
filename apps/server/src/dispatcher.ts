@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { eq, inArray } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
@@ -93,10 +93,11 @@ export class Dispatcher {
       const runtimeDir = path.join(config.dataDir, 'runtime');
       for (const d of [logsDir, promptsDir, runtimeDir]) mkdirSync(d, { recursive: true });
       const promptPath = path.join(promptsDir, `t${ticketId}.r${round}.md`);
-      writeFileSync(promptPath, buildPrompt(ticket));
+      writeFileSync(promptPath, buildPrompt(ticket, wtPath));
 
       // 步 3：渲染命令（参数数组）+ 权限注入（主 OPENCODE_CONFIG_CONTENT，fallback OPENCODE_CONFIG 文件）
-      const argv = renderTemplate(profile.command, { worktree: wtPath, prompt: promptPath });
+      // {{prompt}} 注入 prompt 全文（单参数，128KB 上限由 submitSpec 保证），文件路径仅落盘留档
+      const argv = renderTemplate(profile.command, { worktree: wtPath, prompt: readFileSync(promptPath, 'utf8') });
       const permJson = buildPermJson();
       const permFile = path.join(runtimeDir, 'opencode-perm.json');
       writeFileSync(permFile, permJson);
@@ -372,16 +373,21 @@ export class Dispatcher {
   }
 }
 
-/** prompt 构造：spec 快照 + 报告要求 + 完成定义 */
-function buildPrompt(ticket: Ticket): string {
+/** prompt 构造：工作目录约束 + spec 快照 + 报告要求 + 完成定义 */
+function buildPrompt(ticket: Ticket, worktreePath: string): string {
   return [
     `# 工单 #${ticket.id}：${ticket.title}`,
+    '',
+    '## 工作目录（最高优先级约束）',
+    `你被派发在独立 worktree 中作业，其绝对路径为：${worktreePath}`,
+    '- 所有 shell 命令必须以该路径为 workdir（或先 cd 到该路径）；严禁在其他目录（尤其主仓工作区）执行任何读写或 git 操作',
+    '- 该 worktree 的分支与文件即你的作业范围；worktree 根目录下的 .git 是指针文件属正常现象，以 pwd/ls 所见为准',
     '',
     '## 任务 spec（快照）',
     ticket.specContent ?? '（无 spec 内容）',
     '',
     '## 执行要求',
-    '- 在当前 worktree 内完成任务，可修改文件并用 git commit 提交；禁止任何形式的 push 或远端操作',
+    '- 在 worktree 内完成任务，可修改文件并用 git commit 提交；禁止任何形式的 push 或远端操作',
     '- 完成后在 worktree 根目录写入 atd-report.json（UTF-8 JSON）：',
     '  {"status":"done|blocked","summary":"一句话完成摘要（中文）","commits":["<sha>"],"blockReason":"blocked 时必填：上下文+建议选项+影响面"}',
     '- status=done 表示任务完成；status=blocked 表示遇到无法自行解决的卡点，需人工裁决',

@@ -4,8 +4,8 @@ import { buildServer } from './app.js';
 import { loadConfig } from './config.js';
 import { createDatabase } from './db/client.js';
 
-// repo 根=apps/server/src 上两级；config.yaml 与 workers/ 均以 repo 根定位
-const repoRoot = path.join(import.meta.dirname, '..', '..');
+// repo 根=apps/server/src 上三级；config.yaml 与 workers/ 均以 repo 根定位
+const repoRoot = path.join(import.meta.dirname, '..', '..', '..');
 const config = loadConfig(repoRoot);
 const registry = loadRegistry(path.join(repoRoot, 'workers'));
 

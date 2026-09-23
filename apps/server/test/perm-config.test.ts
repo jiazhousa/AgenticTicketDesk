@@ -3,9 +3,9 @@ import { PERM_BASH_RULES, buildPermConfig, buildPermJson } from '../src/perm-con
 
 /** MUST-2 权限注入规则集逐条断言（B9 专属锚点） */
 describe('perm-config：注入规则集内容', () => {
-  test('bash 规则集逐条：catch-all ask + push/remote/PR 全 deny', () => {
+  test('bash 规则集逐条：catch-all allow（无人值守）+ push/remote/PR 后置 deny 覆盖', () => {
     expect(PERM_BASH_RULES).toEqual({
-      '*': 'ask',
+      '*': 'allow',
       'git push': 'deny',
       'git push *': 'deny',
       'git remote *': 'deny',
@@ -28,7 +28,7 @@ describe('perm-config：注入规则集内容', () => {
 
   test('buildPermConfig 返回副本（防外部篡改常量）', () => {
     const a = buildPermConfig();
-    a.permission.bash['*'] = 'allow';
-    expect(buildPermConfig().permission.bash['*']).toBe('ask');
+    a.permission.bash['*'] = 'tampered';
+    expect(buildPermConfig().permission.bash['*']).toBe('allow');
   });
 });
