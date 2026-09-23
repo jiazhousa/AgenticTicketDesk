@@ -10,10 +10,14 @@ import SpecCard from '../components/SpecCard';
 import DependencyPanel from '../components/DependencyPanel';
 import CommentStream from '../components/CommentStream';
 import Timeline from '../components/Timeline';
+import WorkerCard from '../components/WorkerCard';
+import ReportCard from '../components/ReportCard';
+import BlockerCard from '../components/BlockerCard';
 import { formatTime } from '../utils/format';
 
 /**
- * 工单详情页：四卡布局——①基本信息+状态操作 ②spec 快照 ③依赖与父子 ④留言+时间线。
+ * 工单详情页：卡布局——①基本信息+状态操作 ②执行卡（worker 绑定后）③完成报告（DONE）④卡点处理（BLOCKED/BLOCKER）
+ * ⑤spec 快照 ⑥依赖与父子 ⑦留言+时间线。
  * hasCancelledChildren=true 时顶部 Alert 提示（A7 锚点：CANCELLED 子单不阻塞父单关单，需人工裁决）。
  */
 export default function TicketDetailPage() {
@@ -106,7 +110,15 @@ export default function TicketDetailPage() {
             <Descriptions.Item label="状态"><StatusTag status={ticket.status} /></Descriptions.Item>
             <Descriptions.Item label="创建时间">{formatTime(ticket.createdAt)}</Descriptions.Item>
             <Descriptions.Item label="更新时间">{formatTime(ticket.updatedAt)}</Descriptions.Item>
-            <Descriptions.Item label="worker">{ticket.workerId ?? '（未绑定，S2a 消费）'}</Descriptions.Item>
+            <Descriptions.Item label="worker">
+              {detail.workerName ?? ticket.workerId ?? '（未绑定）'}
+            </Descriptions.Item>
+            <Descriptions.Item label="执行轮次">{ticket.round}</Descriptions.Item>
+            {ticket.pendingLabel != null && (
+              <Descriptions.Item label="卡点层级">
+                <Typography.Text type="danger">{ticket.pendingLabel}</Typography.Text>
+              </Descriptions.Item>
+            )}
             <Descriptions.Item label="描述" span={3}>
               {ticket.description ?? '（无描述）'}
             </Descriptions.Item>
@@ -116,10 +128,48 @@ export default function TicketDetailPage() {
           </div>
         </Card>
 
-        {/* 卡2：spec 快照 */}
+        {/* 卡2：执行（worker 绑定后；含事件流尾部与 worktree 回收） */}
+        {(ticket.workerId != null || detail.execution != null) && (
+          <WorkerCard
+            ticket={ticket}
+            workerName={detail.workerName}
+            execution={detail.execution}
+            onChanged={() => reload()}
+          />
+        )}
+
+        {/* 卡3：完成报告（DONE 且有报告；commits 为工单级 git 实测归集） */}
+        {ticket.status === 'DONE' && detail.report != null && (
+          <ReportCard report={detail.report} commits={detail.commits} />
+        )}
+
+        {/* 卡4：卡点处理——父单视角（BLOCKED 态关联未关 BLOCKER） */}
+        {ticket.status === 'BLOCKED' &&
+          (detail.blocker != null ? (
+            <BlockerCard
+              blocker={detail.blocker}
+              blockReason={detail.report?.blockReason ?? null}
+              onChanged={() => reload()}
+            />
+          ) : (
+            // 编排层保证 BLOCKED 存续期间恰好关联一张未关 BLOCKER；缺失属数据异常
+            <Alert
+              type="error"
+              showIcon
+              message="数据异常：阻塞态未关联卡点单"
+              description="该工单处于阻塞状态但没有对应的未关卡点单，请检查数据一致性。"
+            />
+          ))}
+
+        {/* 卡4：卡点处理——BLOCKER 单自身视角（resolve 入口） */}
+        {ticket.type === 'BLOCKER' && ticket.status === 'IN_PROGRESS' && (
+          <BlockerCard blocker={ticket} parentTicketId={ticket.parentId ?? undefined} onChanged={() => reload()} />
+        )}
+
+        {/* 卡5：spec 快照 */}
         <SpecCard ticket={ticket} onChanged={() => reload()} />
 
-        {/* 卡3：依赖与父子 */}
+        {/* 卡6：依赖与父子 */}
         <DependencyPanel
           ticket={ticket}
           children={detail.children}
@@ -127,7 +177,7 @@ export default function TicketDetailPage() {
           onChanged={() => reload()}
         />
 
-        {/* 卡4：留言 + 转移历史 */}
+        {/* 卡7：留言 + 转移历史 */}
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 16 }}>
           <CommentStream ticketId={ticket.id} comments={detail.comments} onSent={() => reload()} />
           <Timeline transitions={detail.transitions} />
