@@ -34,6 +34,11 @@ const worktreeQuery = z.object({
   keepBranch: emptyAsUndefined(z.enum(['true', 'false'])).optional(),
 });
 
+const reopenBody = z.object({
+  message: z.string().min(1),
+  workerId: z.string().optional(),
+});
+
 const resolveBody = z.object({
   resolution: z.enum(['continue', 'reassign', 'abort']),
   note: z.string().optional(),
@@ -106,5 +111,15 @@ export function registerExecutionRoutes(
       throw new AppError('RESOLUTION_INVALID', '编排运行时未配置，无法裁决');
     }
     return runtime.dispatcher.resolveBlocker(blockerId, body);
+  });
+
+  // POST /api/tickets/:id/reopen —— 终态重开（留言即本轮指令，原 worktree 续跑）
+  app.post('/api/tickets/:id/reopen', async (req) => {
+    const { id } = parse(idParams, req.params);
+    const body = parse(reopenBody, req.body);
+    if (!runtime) {
+      throw new AppError('RESOLUTION_INVALID', '编排运行时未配置，无法重开');
+    }
+    return runtime.dispatcher.reopen(id, body);
   });
 }

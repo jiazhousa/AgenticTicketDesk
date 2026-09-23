@@ -114,10 +114,10 @@ describe('to=SPEC_READY 一律拒绝（USE_SPEC_ENDPOINT，任意来源态）【
   );
 });
 
-describe('终态无出边：DONE/CANCELLED 任意 to 均拒【A7】', () => {
-  const ALL_OTHER: Status[] = ['DRAFT', 'SPEC_READY', 'DISPATCHED', 'IN_PROGRESS', 'DONE', 'CANCELLED'];
+describe('终态仅保留重开出边：DONE/CANCELLED 除→DISPATCHED（重开）外均拒【A7】', () => {
+  const ALL_OTHER: Status[] = ['DRAFT', 'SPEC_READY', 'DISPATCHED', 'IN_PROGRESS', 'DONE', 'CANCELLED', 'BLOCKED', 'FAILED'];
 
-  test.each(['DONE', 'CANCELLED'] as Status[])('%s 终态拒一切转移', (terminal) => {
+  test.each(['DONE', 'CANCELLED'] as Status[])('%s 终态拒绝重开外的一切转移', (terminal) => {
     const { service } = createTestContext();
     const t = service.createTicket({ type: 'TASK', title: `t-${terminal}` });
     if (terminal === 'DONE') {
@@ -127,9 +127,9 @@ describe('终态无出边：DONE/CANCELLED 任意 to 均拒【A7】', () => {
       service.transition(t.id, 'CANCELLED', 'user');
     }
     const before = service.getTicketDetail(t.id).transitions.length;
-    for (const to of ALL_OTHER.filter((s) => s !== terminal)) {
+    for (const to of ALL_OTHER.filter((s) => s !== terminal && s !== 'DISPATCHED')) {
       const err = captureError(() => service.transition(t.id, to, 'user'));
-      expect(err.code).toMatch(/^(INVALID_TRANSITION|USE_SPEC_ENDPOINT)$/);
+      expect(err.code).toMatch(/^(INVALID_TRANSITION|USE_SPEC_ENDPOINT|MANUAL_FORBIDDEN)$/);
     }
     expect(service.getTicket(t.id).status).toBe(terminal);
     expect(service.getTicketDetail(t.id).transitions.length).toBe(before);

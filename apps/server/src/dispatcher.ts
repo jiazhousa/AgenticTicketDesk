@@ -1,10 +1,10 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { WorkerRegistry } from '@atd/worker-core';
 import type { AppConfig } from './config.js';
-import { ticketCommits, ticketDependencies, ticketReports, tickets } from './db/schema.js';
+import { comments, ticketCommits, ticketDependencies, ticketReports, tickets } from './db/schema.js';
 import type * as schema from './db/schema.js';
 import { AppError } from './domain/errors.js';
 import type { Ticket, TicketService } from './domain/ticket-service.js';
@@ -93,7 +93,30 @@ export class Dispatcher {
       const runtimeDir = path.join(config.dataDir, 'runtime');
       for (const d of [logsDir, promptsDir, runtimeDir]) mkdirSync(d, { recursive: true });
       const promptPath = path.join(promptsDir, `t${ticketId}.r${round}.md`);
-      writeFileSync(promptPath, buildPrompt(ticket, wtPath));
+      // 轮次上下文（round>1：前轮报告 + 重开留言/重试指令）
+      let promptCtx: Parameters<typeof buildPrompt>[2];
+      if (round > 1) {
+        const prevReports = this.deps.db
+          .select({
+            round: ticketReports.round,
+            status: ticketReports.status,
+            summary: ticketReports.summary,
+            blockReason: ticketReports.blockReason,
+          })
+          .from(ticketReports)
+          .where(eq(ticketReports.ticketId, ticketId))
+          .orderBy(asc(ticketReports.round))
+          .all();
+        const lastUser = this.deps.db
+          .select({ content: comments.content })
+          .from(comments)
+          .where(and(eq(comments.ticketId, ticketId), eq(comments.authorType, 'user')))
+          .orderBy(desc(comments.id))
+          .limit(1)
+          .get();
+        promptCtx = { round, prevReports, lastUserComment: lastUser?.content ?? null };
+      }
+      writeFileSync(promptPath, buildPrompt(ticket, wtPath, promptCtx));
 
       // 步 3：渲染命令（参数数组）+ 权限注入（主 OPENCODE_CONFIG_CONTENT，fallback OPENCODE_CONFIG 文件）
       // {{prompt}} 注入 prompt 全文（单参数，128KB 上限由 submitSpec 保证），文件路径仅落盘留档
@@ -229,6 +252,8 @@ export class Dispatcher {
         })
         .run();
       service.transition(ticketId, 'DONE', { actor: 'system', note: 'worker 报告完成' });
+      // 编排链自动流转：解锁下游（有 parent 的 TASK 且其余依赖全 DONE 时自动放行）
+      this.onTicketSettled(ticketId);
       return false;
     }
     if (reportRead.ok && reportRead.report.status === 'blocked') {
@@ -293,14 +318,13 @@ export class Dispatcher {
   resolveBlocker(
     blockerId: number,
     input: { resolution: 'continue' | 'reassign' | 'abort'; note?: string; reassignWorkerId?: string },
-  ): { blocker: Ticket; parent: Ticket } {
-    const { service, registry } = this.deps;
+  ): { blocker: Ticket; parent: Ticket } {    const { service, registry } = this.deps;
 
     const blockerRow = this.deps.db.select().from(tickets).where(eq(tickets.id, blockerId)).get();
     if (!blockerRow || blockerRow.type !== 'BLOCKER') {
       throw new AppError('RESOLUTION_INVALID', `卡点单不存在或不是 BLOCKER：#${blockerId}`);
     }
-    if (blockerRow.status !== 'IN_PROGRESS') {
+    if (blockerRow.status !== 'BLOCKED') {
       throw new AppError('RESOLUTION_INVALID', `卡点单已关（当前 ${blockerRow.status}）：#${blockerId}`);
     }
     // 父单=被该 BLOCKER 阻塞的单（依赖行：父.id blockedBy blocker.id）
@@ -349,6 +373,80 @@ export class Dispatcher {
     return { blocker: service.getTicket(blockerId), parent: service.getTicket(parent.id) };
   }
 
+  /**
+   * 终态重开：用户留言（即本轮指令）→ 留言落库 → 终态→DISPATCHED（user 边）→ 异步原 worktree 续跑。
+   * 新一轮 prompt 由 buildPrompt 的轮次上下文构造（用户留言 + 前轮报告摘要 + spec）。
+   */
+  reopen(ticketId: number, input: { message: string; workerId?: string }): Ticket {
+    const { service } = this.deps;
+    const ticket = service.getTicket(ticketId);
+    if (ticket.type !== 'TASK') {
+      throw new AppError('RESOLUTION_INVALID', `仅 TASK 可重开（当前类型 ${ticket.type}）`);
+    }
+    if (!['DONE', 'FAILED', 'CANCELLED'].includes(ticket.status)) {
+      throw new AppError('RESOLUTION_INVALID', `仅终态单可重开（当前 ${ticket.status}）`);
+    }
+    if (!input.message.trim()) {
+      throw new AppError('VALIDATION', '重开留言不能为空');
+    }
+    // 留言即本轮指令（authorType=user，buildPrompt 轮次上下文按此识别）
+    service.addComment(ticketId, {
+      authorType: 'user',
+      authorName: '我',
+      content: input.message.trim(),
+    });
+    const reopened = service.transition(ticketId, 'DISPATCHED', {
+      actor: 'user',
+      note: '重开：问题未解决',
+      ...(input.workerId ? { workerId: input.workerId } : {}),
+    });
+    this.onDispatched(reopened);
+    return reopened;
+  }
+
+  /**
+   * 编排链自动流转：单落定（DONE）后，检查以本单为 blockedBy 的下游 TASK——
+   * 有 parent（编排链节点）且处于 SPEC_READY、其余依赖全部 DONE 时自动放行。
+   * 独立单（无 parent）不自动放行（保持人工控制）。
+   */
+  onTicketSettled(ticketId: number): void {
+    const { service, db } = this.deps;
+    let downstream: { id: number }[] = [];
+    try {
+      downstream = db
+        .select({ id: ticketDependencies.ticketId })
+        .from(ticketDependencies)
+        .where(eq(ticketDependencies.blockedByTicketId, ticketId))
+        .all();
+    } catch {
+      return;
+    }
+    for (const row of downstream) {
+      try {
+        const t = service.getTicket(row.id);
+        // 仅对已预绑定 worker 的编排链节点自动放行——未定谁干活的不自动开工（留人工）
+        if (t.type !== 'TASK' || t.status !== 'SPEC_READY' || t.parentId == null || !t.workerId) continue;
+        // 其余依赖是否全部 DONE
+        const deps = db
+          .select({ status: tickets.status })
+          .from(ticketDependencies)
+          .innerJoin(tickets, eq(ticketDependencies.blockedByTicketId, tickets.id))
+          .where(eq(ticketDependencies.ticketId, row.id))
+          .all();
+        if (deps.every((d) => d.status === 'DONE')) {
+          const dispatched = service.transition(row.id, 'DISPATCHED', {
+            actor: 'system',
+            note: '编排链依赖满足，自动放行',
+          });
+          this.onDispatched(dispatched);
+        }
+      } catch (e) {
+        // 单个下游放行失败不阻断其他下游
+        console.error('[atd-dispatcher] 自动放行失败', row.id, e);
+      }
+    }
+  }
+
   /** 服务重启恢复：执行单进程已随重启消亡——IN_PROGRESS→FAILED；DISPATCHED→CANCELLED（均附留言） */
   recoverOnStartup(): void {
     const { service } = this.deps;
@@ -382,9 +480,17 @@ export class Dispatcher {
   }
 }
 
-/** prompt 构造：工作目录约束 + spec 快照 + 报告要求 + 完成定义 */
-function buildPrompt(ticket: Ticket, worktreePath: string): string {
-  return [
+/** prompt 构造：工作目录约束 + 轮次上下文 + spec 快照 + 报告要求 + 完成定义 */
+function buildPrompt(
+  ticket: Ticket,
+  worktreePath: string,
+  ctx?: {
+    round: number;
+    prevReports: { round: number; status: string; summary: string | null; blockReason: string | null }[];
+    lastUserComment: string | null;
+  },
+): string {
+  const sections: string[] = [
     `# 工单 #${ticket.id}：${ticket.title}`,
     '',
     '## 工作目录（最高优先级约束）',
@@ -392,6 +498,21 @@ function buildPrompt(ticket: Ticket, worktreePath: string): string {
     '- 所有 shell 命令必须以该路径为 workdir（或先 cd 到该路径）；严禁在其他目录（尤其主仓工作区）执行任何读写或 git 操作',
     '- 该 worktree 的分支与文件即你的作业范围；worktree 根目录下的 .git 是指针文件属正常现象，以 pwd/ls 所见为准',
     '',
+  ];
+  // 轮次上下文（round>1：重开或 L2 重试——认知连续性靠前轮报告 + 用户最新指令）
+  if (ctx && ctx.round > 1) {
+    sections.push('## 轮次上下文（本工单已执行过前序轮次）', '');
+    for (const r of ctx.prevReports) {
+      sections.push(`- 第 ${r.round} 轮（${r.status}）：${r.summary ?? r.blockReason ?? '（无摘要）'}`);
+    }
+    if (ctx.lastUserComment) {
+      sections.push('', `**用户对本轮的指令（重开留言，最高优先执行）**：${ctx.lastUserComment}`);
+    } else {
+      sections.push('', '**本轮指令**：继续完成工单任务（前轮未产出有效完成报告）。');
+    }
+    sections.push('', 'worktree 中已存在的文件与 git 历史是前序轮次的工作成果，先检视再行动，避免重复或破坏。', '');
+  }
+  sections.push(
     '## 任务 spec（快照）',
     ticket.specContent ?? '（无 spec 内容）',
     '',
@@ -402,5 +523,6 @@ function buildPrompt(ticket: Ticket, worktreePath: string): string {
     '- status=done 表示任务完成；status=blocked 表示遇到无法自行解决的卡点，需人工裁决',
     '- 纯调研等零 commit 情况合法，在 summary 中说明即可',
     '',
-  ].join('\n');
+  );
+  return sections.join('\n');
 }

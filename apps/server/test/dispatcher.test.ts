@@ -112,7 +112,7 @@ describe('B3：卡点三裁决（BLOCK_MODE 参数化分轮）', () => {
 
     // BLOCKER 单：blockedBy 方向（父单依赖列表含 BLOCKER）+ 首条留言=blockReason
     const detail = ctx.service.getTicketDetail(id);
-    expect(detail.blocker).toMatchObject({ type: 'BLOCKER', status: 'IN_PROGRESS' });
+    expect(detail.blocker).toMatchObject({ type: 'BLOCKER', status: 'BLOCKED', pendingLabel: 'l3' });
     expect(detail.blocker!.title).toBe('卡点: 测试任务');
     expect(detail.dependencies.map((d) => d.id)).toContain(detail.blocker!.id);
     const blockerComments = ctx.service.getTicketDetail(detail.blocker!.id).comments;
@@ -333,5 +333,68 @@ describe('recoverOnStartup：重启恢复', () => {
     expect(ctx.service.getTicket(b.id).status).toBe('CANCELLED');
     expect(ctx.service.getTicketDetail(b.id).comments.at(-1)!.content).toContain('派发失败');
     expect(ctx.service.getTicket(s.id).status).toBe('IN_PROGRESS');
+  });
+});
+
+describe('F1/F4：终态重开与编排链自动放行（验收反馈）', () => {
+  test('reopen：DONE 单留言重开 → 原 worktree round=2 续跑 → DONE；留言注入轮次上下文', async () => {
+    const ctx = createRealContext({ autoDispatch: true, profiles: [{ id: 'fd', command: fixtureCmd('fake-done.mjs') }] });
+    const id = await dispatchTicket(ctx, 'fd');
+    await waitStatus(ctx, id, ['DONE']);
+    expect(ctx.service.getTicket(id).round).toBe(1);
+    // 重开：留言即指令 → DISPATCHED → 同 worktree 第二轮
+    ctx.dispatcher.reopen(id, { message: '问题尚未解决：请再补一个文件 docs/reopen.md' });
+    await waitStatus(ctx, id, ['DONE']);
+    const t = ctx.service.getTicket(id);
+    expect(t.round).toBe(2);
+    const detail = ctx.service.getTicketDetail(id);
+    // 重开留言落库（user）
+    expect(detail.comments.some((c) => c.authorType === 'user' && c.content.includes('问题尚未解决'))).toBe(true);
+    // 第二轮 prompt 含轮次上下文与用户指令
+    const prompt2 = readFileSync(path.join(ctx.config.dataDir, 'prompts', `t${id}.r2.md`), 'utf8');
+    expect(prompt2).toContain('问题尚未解决');
+    expect(prompt2).toContain('轮次上下文');
+  });
+
+  test('编排链自动放行：并行 1/2 全 DONE → 下游 3（blockedBy 1+2）自动 DISPATCHED 并执行', async () => {
+    const ctx = createRealContext({ autoDispatch: true, profiles: [{ id: 'fd', command: fixtureCmd('fake-done.mjs') }] });
+    const story = ctx.service.createTicket({ type: 'STORY', title: '编排链' });
+    const t1 = ctx.service.createTicket({ type: 'TASK', title: '并行1', parentId: story.id });
+    const t2 = ctx.service.createTicket({ type: 'TASK', title: '并行2', parentId: story.id });
+    const t3 = ctx.service.createTicket({ type: 'TASK', title: '下游', parentId: story.id, workerId: 'fd' });
+    for (const t of [t1, t2, t3]) {
+      ctx.service.submitSpec(t.id, '# spec');
+    }
+    ctx.service.addDependency(t3.id, t1.id);
+    ctx.service.addDependency(t3.id, t2.id);
+    // 放行 1、2（3 的依赖未齐不能放行）
+    for (const tid of [t1.id, t2.id]) {
+      const r = await ctx.app.inject({ method: 'POST', url: `/api/tickets/${tid}/transition`, payload: { to: 'DISPATCHED', workerId: 'fd' } });
+      expect(r.statusCode).toBe(200);
+    }
+    // 3 在依赖齐前放行被拒
+    const { captureError } = await import('./helpers.js');
+    const err = captureError(() => ctx.service.transition(t3.id, 'DISPATCHED', { actor: 'user', workerId: 'fd' }));
+    expect(err.code).toBe('BLOCKED_BY_PENDING');
+    await waitStatus(ctx, t1.id, ['DONE']);
+    await waitStatus(ctx, t2.id, ['DONE']);
+    // 1、2 全 DONE → 3 自动放行并执行完成
+    await waitStatus(ctx, t3.id, ['DONE']);
+    const d3 = ctx.service.getTicketDetail(t3.id);
+    expect(d3.transitions.some((x) => x.note === '编排链依赖满足，自动放行')).toBe(true);
+  });
+
+  test('独立单（无 parent）不自动放行：上游 DONE 后仍 SPEC_READY', async () => {
+    const ctx = createRealContext({ autoDispatch: true, profiles: [{ id: 'fd', command: fixtureCmd('fake-done.mjs') }] });
+    const a = ctx.service.createTicket({ type: 'TASK', title: '独立上游' });
+    const b = ctx.service.createTicket({ type: 'TASK', title: '独立下游' });
+    ctx.service.submitSpec(a.id, '# spec');
+    ctx.service.submitSpec(b.id, '# spec');
+    ctx.service.addDependency(b.id, a.id);
+    const r = await ctx.app.inject({ method: 'POST', url: `/api/tickets/${a.id}/transition`, payload: { to: 'DISPATCHED', workerId: 'fd' } });
+    expect(r.statusCode).toBe(200);
+    await waitStatus(ctx, a.id, ['DONE']);
+    // b 无 parent：不自动放行，保持人工控制
+    expect(ctx.service.getTicket(b.id).status).toBe('SPEC_READY');
   });
 });

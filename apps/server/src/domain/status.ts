@@ -24,10 +24,11 @@ export const TRANSITIONS: Record<Status, Status[]> = {
   SPEC_READY: ['DISPATCHED', 'CANCELLED'],
   DISPATCHED: ['IN_PROGRESS', 'CANCELLED'],
   IN_PROGRESS: ['DONE', 'BLOCKED', 'FAILED'],
-  BLOCKED: ['IN_PROGRESS', 'DISPATCHED', 'FAILED', 'CANCELLED'],
-  DONE: [],
-  CANCELLED: [],
-  FAILED: [],
+  BLOCKED: ['IN_PROGRESS', 'DISPATCHED', 'FAILED', 'CANCELLED', 'DONE'],
+  // 终态可经重开回 DISPATCHED（原 worktree 续跑，语义见 spec 验收反馈附录）
+  DONE: ['DISPATCHED'],
+  CANCELLED: ['DISPATCHED'],
+  FAILED: ['DISPATCHED'],
 };
 
 /**
@@ -44,7 +45,11 @@ export function isUserEdge(type: TicketType, from: Status, to: Status): boolean 
       (from === 'SPEC_READY' && to === 'DISPATCHED') ||
       (from === 'SPEC_READY' && to === 'CANCELLED') ||
       (from === 'DISPATCHED' && to === 'CANCELLED') ||
-      (from === 'BLOCKED' && to === 'CANCELLED')
+      (from === 'BLOCKED' && to === 'CANCELLED') ||
+      // 重开：终态 → DISPATCHED（原 worktree 续跑，留言即本轮指令）
+      (from === 'DONE' && to === 'DISPATCHED') ||
+      (from === 'FAILED' && to === 'DISPATCHED') ||
+      (from === 'CANCELLED' && to === 'DISPATCHED')
     );
   }
   return false;

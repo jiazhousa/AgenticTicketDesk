@@ -119,6 +119,8 @@ export class TicketService {
     title: string;
     description?: string | null;
     parentId?: number | null;
+    /** 预绑定 worker（仅 TASK；编排链拆单时定 worker 的语义——自动放行的前提） */
+    workerId?: string | null;
   }): Ticket {
     return this.db.transaction((tx) => {
       if (input.parentId != null) {
@@ -148,7 +150,7 @@ export class TicketService {
           status: 'DRAFT',
           parentId: input.parentId ?? null,
           specContent: null,
-          workerId: null,
+          workerId: input.workerId ?? null,
           pendingLabel: null,
           round: 0,
           createdAt: now,
@@ -397,12 +399,18 @@ export class TicketService {
       if (to === 'DONE' && row.type === 'STORY') {
         this.assertChildrenSettled(tx, id);
       }
+      // BLOCKED→DONE 仅限 BLOCKER 关单（resolve 路径）；TASK 的 BLOCKED 出路只有裁决三向+取消
+      if (row.status === 'BLOCKED' && to === 'DONE' && row.type !== 'BLOCKER') {
+        throw new AppError('INVALID_TRANSITION', `仅 BLOCKER 可从 BLOCKED 直接关单（当前类型 ${row.type}）`);
+      }
       // ②③ TASK 放行三件套：workerId 必填 → ∈Registry → worktree 可建
+      // （重开场景：未指定新 workerId 时沿用原绑定）
       if (row.type === 'TASK' && to === 'DISPATCHED' && actor === 'user') {
-        if (!o.workerId) {
+        const effectiveWorkerId = o.workerId ?? row.workerId;
+        if (!effectiveWorkerId) {
           throw new AppError('WORKER_REQUIRED', 'TASK 放行必须指定 workerId');
         }
-        if (this.guards && !new Set(this.guards.knownWorkerIds()).has(o.workerId)) {
+        if (o.workerId && this.guards && !new Set(this.guards.knownWorkerIds()).has(o.workerId)) {
           throw new AppError('WORKER_UNKNOWN', `worker 未注册：${o.workerId}`);
         }
         this.guards?.assertWorktreeReady(id);
@@ -465,11 +473,12 @@ export class TicketService {
           type: 'BLOCKER',
           title: `卡点: ${parent.title}`,
           description: null,
-          status: 'IN_PROGRESS',
+          // 卡点单本质是「被父单的卡点阻塞、等人处理」——呈现 BLOCKED(pending:l3) 而非 IN_PROGRESS
+          status: 'BLOCKED',
           parentId: null,
           specContent: null,
           workerId: null,
-          pendingLabel: null,
+          pendingLabel: 'l3',
           round: 0,
           createdAt: now,
           updatedAt: now,
@@ -480,7 +489,7 @@ export class TicketService {
         .values({
           ticketId: blocker.id,
           fromStatus: 'DRAFT',
-          toStatus: 'IN_PROGRESS',
+          toStatus: 'BLOCKED',
           operator: 'system',
           note: '卡点升级自动创建',
           createdAt: now,

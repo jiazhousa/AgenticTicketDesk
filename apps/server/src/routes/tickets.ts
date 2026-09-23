@@ -31,6 +31,8 @@ const createBody = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
   parentId: z.number().int().positive().optional(),
+  /** 预绑定 worker（仅 TASK；编排链拆单场景，自动放行前提） */
+  workerId: z.string().optional(),
 });
 
 const listQuery = z.object({

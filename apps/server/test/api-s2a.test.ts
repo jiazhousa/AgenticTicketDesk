@@ -139,7 +139,7 @@ describe('GET /api/tickets/:id 详情聚合扩展', () => {
     const body = res.json();
     expect(body.ticket.status).toBe('BLOCKED');
     expect(body.ticket.pendingLabel).toBe('l3');
-    expect(body.blocker).toMatchObject({ id: blocker, type: 'BLOCKER', status: 'IN_PROGRESS' });
+    expect(body.blocker).toMatchObject({ id: blocker, type: 'BLOCKER', status: 'BLOCKED', pendingLabel: 'l3' });
     // BLOCKER 关闭后详情不再透出
     ctx.service.transition(blocker, 'DONE', { actor: 'system' });
     const after = (await ctx.app.inject({ method: 'GET', url: `/api/tickets/${parent}` })).json();
