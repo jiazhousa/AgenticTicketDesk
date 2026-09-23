@@ -19,8 +19,12 @@ export const tickets = sqliteTable('tickets', {
   parentId: integer('parent_id').references((): AnySQLiteColumn => tickets.id),
   /** spec 快照：DRAFT 期可编辑，转入 SPEC_READY 即冻结 */
   specContent: text('spec_content'),
-  /** 执行 worker 绑定（S1 空占位，S2a 消费） */
+  /** 执行 worker 绑定（放行时写入，改派时更新） */
   workerId: text('worker_id'),
+  /** BLOCKED 存续期的卡点等级（'l3'；后续版本扩 'agent'），转出 BLOCKED 时置 NULL */
+  pendingLabel: text('pending_label'),
+  /** 执行轮次（每次 spawn +1；首轮 1） */
+  round: integer('round').notNull().default(0),
   /** 毫秒时间戳 */
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
@@ -65,5 +69,33 @@ export const ticketTransitions = sqliteTable('ticket_transitions', {
   toStatus: text('to_status').notNull(),
   operator: text('operator').notNull(),
   note: text('note'),
+  createdAt: integer('created_at').notNull(),
+});
+
+/** 工单 commit 关联：各轮新增 commit 按（轮次, sha）落库；commit 以 git 实测为准 */
+export const ticketCommits = sqliteTable(
+  'ticket_commits',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    ticketId: integer('ticket_id')
+      .notNull()
+      .references(() => tickets.id),
+    round: integer('round').notNull(),
+    sha: text('sha').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [uniqueIndex('uq_ticket_commit').on(t.ticketId, t.round, t.sha)],
+);
+
+/** worker 完成报告（每轮一条；status 'done' | 'blocked'） */
+export const ticketReports = sqliteTable('ticket_reports', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  ticketId: integer('ticket_id')
+    .notNull()
+    .references(() => tickets.id),
+  round: integer('round').notNull(),
+  status: text('status').notNull(),
+  summary: text('summary').notNull(),
+  blockReason: text('block_reason'),
   createdAt: integer('created_at').notNull(),
 });

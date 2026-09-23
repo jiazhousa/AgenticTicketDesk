@@ -3,6 +3,9 @@ import type { Status } from '../src/domain/status.js';
 import type { TicketService } from '../src/domain/ticket-service.js';
 import { createTestContext, captureError } from './helpers.js';
 
+/**
+ * 沿合法路径推进（TASK：放行带 workerId、执行边走 system 通道；STORY：人工边全集）。
+ */
 function walkTo(service: TicketService, id: number, target: Status): void {
   const NEXT: Partial<Record<Status, Status>> = {
     DRAFT: 'SPEC_READY',
@@ -10,11 +13,14 @@ function walkTo(service: TicketService, id: number, target: Status): void {
     DISPATCHED: 'IN_PROGRESS',
     IN_PROGRESS: 'DONE',
   };
+  const isTask = service.getTicket(id).type === 'TASK';
   let cur = service.getTicket(id).status;
   while (cur !== target) {
     const to = NEXT[cur];
     if (!to) throw new Error(`测试助手无法从 ${cur} 推进到 ${target}`);
     if (to === 'SPEC_READY') service.submitSpec(id, '# spec');
+    else if (isTask && to === 'DISPATCHED') service.transition(id, to, { actor: 'user', workerId: 'fake' });
+    else if (isTask && (to === 'IN_PROGRESS' || to === 'DONE')) service.transition(id, to, { actor: 'system' });
     else service.transition(id, to, 'user');
     cur = service.getTicket(id).status;
   }
@@ -87,7 +93,9 @@ describe('blockedBy 依赖门【A5】', () => {
     const b = service.createTicket({ type: 'TASK', title: '被阻塞B' });
     service.submitSpec(b.id, '# spec');
     service.addDependency(b.id, a.id);
-    const err = captureError(() => service.transition(b.id, 'DISPATCHED', 'user'));
+    const err = captureError(() =>
+      service.transition(b.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' }),
+    );
     expect(err.code).toBe('BLOCKED_BY_PENDING');
     expect(err.details!.join('\n')).toContain(`#${a.id}`);
     expect(service.getTicket(b.id).status).toBe('SPEC_READY');
@@ -100,7 +108,9 @@ describe('blockedBy 依赖门【A5】', () => {
     const b = service.createTicket({ type: 'TASK', title: '被阻塞B' });
     service.submitSpec(b.id, '# spec');
     service.addDependency(b.id, a.id);
-    expect(service.transition(b.id, 'DISPATCHED', 'user').status).toBe('DISPATCHED');
+    expect(
+      service.transition(b.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' }).status,
+    ).toBe('DISPATCHED');
   });
 });
 

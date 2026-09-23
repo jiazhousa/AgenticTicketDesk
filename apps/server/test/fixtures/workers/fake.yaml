@@ -1,0 +1,7 @@
+# 测试用预置 profile：默认测试上下文的注册表成员（命令不会被真正执行——autoDispatch 关闭）
+id: fake
+name: Fake
+protocol: spawn-cli
+capabilities: [task]
+command: echo {{worktree}} {{prompt}}
+timeoutMin: 1

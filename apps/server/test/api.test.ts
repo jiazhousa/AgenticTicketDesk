@@ -22,14 +22,14 @@ async function createTicket(
   return res.json();
 }
 
-/** transition 助手 */
-async function transition(app: FastifyInstance, id: number, to: string, note?: string) {
-  return post(app, `/api/tickets/${id}/transition`, { to, note });
+/** transition 助手（TASK 放行需带 workerId） */
+async function transition(app: FastifyInstance, id: number, to: string, note?: string, workerId?: string) {
+  return post(app, `/api/tickets/${id}/transition`, { to, note, workerId });
 }
 
 describe('API 全链：建单→spec→依赖→流转→父单关单【A1】', () => {
   test('STORY+2 子 TASK 全链闭环（第二子单走 blockedBy 先拒后过）', async () => {
-    const { app } = createTestContext();
+    const { app, service } = createTestContext();
 
     // 建父 STORY + 2 子 TASK
     const parent = await createTicket(app, { type: 'STORY', title: '父需求' });
@@ -37,30 +37,39 @@ describe('API 全链：建单→spec→依赖→流转→父单关单【A1】', 
     const child1 = await createTicket(app, { type: 'TASK', title: '子任务1', parentId: parent.id });
     const child2 = await createTicket(app, { type: 'TASK', title: '子任务2', parentId: parent.id });
 
-    // 子2 依赖子1，子1 未完成时子2 放行被拒【A5】
+    // 子2 依赖子1，子1 未完成时子2 放行被拒【A5】（blockedBy 门最优先，先于 workerId 校验）
     const addDep = await post(app, `/api/tickets/${child2.id}/dependencies`, {
       blockedByTicketId: child1.id,
     });
     expect(addDep.statusCode).toBe(201);
     expect(addDep.json()).toEqual({ ok: true });
     await post(app, `/api/tickets/${child2.id}/spec`, { specContent: '# 子2 spec' });
-    const blocked = await transition(app, child2.id, 'DISPATCHED');
+    const blocked = await transition(app, child2.id, 'DISPATCHED', undefined, 'fake');
     expect(blocked.statusCode).toBe(422);
     const blockedBody = blocked.json();
     expect(blockedBody.error.code).toBe('BLOCKED_BY_PENDING');
     expect(blockedBody.error.message).toBeTruthy();
     expect(blockedBody.error.details.join('\n')).toContain(`#${child1.id}`);
 
-    // 子1 走完全程
+    // 子1 走完全程：TASK 执行边已收口 system 通道——HTTP 手推 → 422 MANUAL_FORBIDDEN（收口回归锚点），
+    // 后续态由 system 通道（dispatcher 进/结算进）完成
     await post(app, `/api/tickets/${child1.id}/spec`, { specContent: '# 子1 spec' });
-    expect((await transition(app, child1.id, 'DISPATCHED')).statusCode).toBe(200);
-    expect((await transition(app, child1.id, 'IN_PROGRESS')).statusCode).toBe(200);
-    expect((await transition(app, child1.id, 'DONE', '子1 完成')).statusCode).toBe(200);
+    expect((await transition(app, child1.id, 'DISPATCHED', undefined, 'fake')).statusCode).toBe(200);
+    const ip1 = await transition(app, child1.id, 'IN_PROGRESS');
+    expect(ip1.statusCode).toBe(422);
+    expect(ip1.json().error.code).toBe('MANUAL_FORBIDDEN');
+    service.transition(child1.id, 'IN_PROGRESS', { actor: 'system' });
+    const done1 = await transition(app, child1.id, 'DONE');
+    expect(done1.statusCode).toBe(422);
+    expect(done1.json().error.code).toBe('MANUAL_FORBIDDEN');
+    service.transition(child1.id, 'DONE', { actor: 'system' });
 
-    // 子1 DONE 后子2 放行通过，走完全程
-    expect((await transition(app, child2.id, 'DISPATCHED')).statusCode).toBe(200);
-    expect((await transition(app, child2.id, 'IN_PROGRESS')).statusCode).toBe(200);
-    expect((await transition(app, child2.id, 'DONE')).statusCode).toBe(200);
+    // 子1 DONE 后子2 放行通过，走完全程（同上：system 边手推被拒后由 system 通道完成）
+    expect((await transition(app, child2.id, 'DISPATCHED', undefined, 'fake')).statusCode).toBe(200);
+    expect((await transition(app, child2.id, 'IN_PROGRESS')).statusCode).toBe(422);
+    service.transition(child2.id, 'IN_PROGRESS', { actor: 'system' });
+    expect((await transition(app, child2.id, 'DONE')).statusCode).toBe(422);
+    service.transition(child2.id, 'DONE', { actor: 'system' });
 
     // 父单关单（聚合门满足）
     await post(app, `/api/tickets/${parent.id}/spec`, { specContent: '# 父 spec' });
@@ -184,7 +193,7 @@ describe('DELETE /dependencies 解除 blockedBy 门【A5】', () => {
     await post(app, `/api/tickets/${b.id}/dependencies`, { blockedByTicketId: a.id });
     await post(app, `/api/tickets/${b.id}/spec`, { specContent: '# spec' });
 
-    const before = await transition(app, b.id, 'DISPATCHED');
+    const before = await transition(app, b.id, 'DISPATCHED', undefined, 'fake');
     expect(before.statusCode).toBe(422);
     expect(before.json().error.code).toBe('BLOCKED_BY_PENDING');
 
@@ -194,7 +203,7 @@ describe('DELETE /dependencies 解除 blockedBy 门【A5】', () => {
     });
     expect(del.statusCode).toBe(204);
 
-    const after = await transition(app, b.id, 'DISPATCHED');
+    const after = await transition(app, b.id, 'DISPATCHED', undefined, 'fake');
     expect(after.statusCode).toBe(200);
     expect(after.json().status).toBe('DISPATCHED');
   });
@@ -212,7 +221,7 @@ describe('404 与时间线【A3】', () => {
     const { app } = createTestContext();
     const t = await createTicket(app, { type: 'TASK', title: 't' });
     await post(app, `/api/tickets/${t.id}/spec`, { specContent: '# s' });
-    await transition(app, t.id, 'DISPATCHED', '放行');
+    await transition(app, t.id, 'DISPATCHED', '放行', 'fake');
     const detail = (await get(app, `/api/tickets/${t.id}`)).json();
     expect(detail.transitions).toHaveLength(2);
     expect(detail.transitions[0]).toMatchObject({ fromStatus: 'DRAFT', toStatus: 'SPEC_READY', note: 'submit spec' });
