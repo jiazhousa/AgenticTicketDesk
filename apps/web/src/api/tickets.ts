@@ -7,6 +7,8 @@ import { message } from 'antd';
 import type {
   ApiErrorBody,
   CreateTicketRequest,
+  LogsResponse,
+  ResolveBlockerRequest,
   Ticket,
   TicketComment,
   TicketDetail,
@@ -14,6 +16,7 @@ import type {
   TicketStatus,
   TicketType,
   UpdateTicketRequest,
+  WorkerInfo,
 } from './types';
 
 /** 携带契约错误码的请求异常（code 见 impl §2.4 错误码全集） */
@@ -32,9 +35,14 @@ export class ApiError extends Error {
 /**
  * 底层请求：解析统一错误包裹体 `{ error: { code, message, details? } }`。
  * 204 无响应体（DELETE 依赖）。
+ * opts.silent=true 时不弹 toast（事件流轮询等高频场景，错误由调用方行内展示）。
  * 注：antd 静态 message 无法消费 ConfigProvider 主题上下文，本地单用户工具可接受。
  */
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  opts: { silent?: boolean } = {},
+): Promise<T> {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
     ...init,
@@ -48,11 +56,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const err = (body as ApiErrorBody | null)?.error;
     const details = err?.details;
     const text = details?.length ? `${err?.message ?? '请求失败'}（${details.join('；')}）` : (err?.message ?? '请求失败');
-    if (err?.code) {
+    if (!opts.silent) {
       message.error(text);
+    }
+    if (err?.code) {
       throw new ApiError(err.code, text, details);
     }
-    message.error(`请求失败（HTTP ${res.status}）`);
+    if (!opts.silent) {
+      message.error(`请求失败（HTTP ${res.status}）`);
+    }
     throw new ApiError('UNKNOWN', `请求失败（HTTP ${res.status}）`);
   }
   return body as T;
@@ -98,11 +110,16 @@ export function submitSpec(id: number, specContent: string): Promise<Ticket> {
   });
 }
 
-/** §3.6 POST /api/tickets/:id/transition —— 状态转移（operator 固定 'user'） */
-export function transitionTicket(id: number, to: TicketStatus, note?: string): Promise<Ticket> {
+/** §3.6 POST /api/tickets/:id/transition —— 状态转移（operator 固定 'user'；TASK 放行必带 workerId） */
+export function transitionTicket(
+  id: number,
+  to: TicketStatus,
+  note?: string,
+  workerId?: string,
+): Promise<Ticket> {
   return request<Ticket>(`/api/tickets/${id}/transition`, {
     method: 'POST',
-    body: JSON.stringify({ to, note }),
+    body: JSON.stringify({ to, note, workerId }),
   });
 }
 
@@ -125,6 +142,44 @@ export function addDependency(id: number, blockedByTicketId: number): Promise<{ 
 /** §3.8 DELETE /api/tickets/:id/dependencies/:blockedById —— 移除依赖（204） */
 export function removeDependency(id: number, blockedById: number): Promise<void> {
   return request<void>(`/api/tickets/${id}/dependencies/${blockedById}`, {
+    method: 'DELETE',
+  });
+}
+
+/** GET /api/workers —— Registry worker 档案列表（放行/改派选择数据源） */
+export function getWorkers(): Promise<WorkerInfo[]> {
+  return request<WorkerInfo[]>('/api/workers');
+}
+
+/**
+ * GET /api/tickets/:id/logs?round=&tail= —— 执行日志尾部（统一事件流）。
+ * 轮询高频场景：静默失败（不弹全局 toast），错误由 WorkerCard 行内展示。
+ */
+export function getLogs(
+  id: number,
+  params: { round?: number; tail?: number } = {},
+): Promise<LogsResponse> {
+  const qs = new URLSearchParams();
+  if (params.round != null) qs.set('round', String(params.round));
+  if (params.tail != null) qs.set('tail', String(params.tail));
+  const suffix = qs.toString() !== '' ? `?${qs.toString()}` : '';
+  return request<LogsResponse>(`/api/tickets/${id}/logs${suffix}`, undefined, { silent: true });
+}
+
+/**
+ * POST /api/tickets/:blockerId/resolve —— 卡点裁决关单（BLOCKER→DONE + 按裁决转父单）。
+ * 返回体不消费（成功后调用方重载详情）。
+ */
+export function resolveBlocker(blockerId: number, req: ResolveBlockerRequest): Promise<void> {
+  return request<void>(`/api/tickets/${blockerId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify(req),
+  });
+}
+
+/** DELETE /api/tickets/:id/worktree?keepBranch= —— 回收 worktree（执行中/非终态 422 WORKTREE_ACTIVE） */
+export function reclaimWorktree(id: number, keepBranch: boolean): Promise<void> {
+  return request<void>(`/api/tickets/${id}/worktree?keepBranch=${keepBranch}`, {
     method: 'DELETE',
   });
 }

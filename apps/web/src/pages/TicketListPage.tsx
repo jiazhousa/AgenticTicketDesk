@@ -7,16 +7,18 @@ import type { TicketListItem, TicketStatus, TicketType } from '../api/types';
 import StatusTag, { TypeTag, statusLabel, typeLabel } from '../components/StatusTag';
 import { formatTime } from '../utils/format';
 
-/** 状态筛选项（六态全量） */
+/** 状态筛选项（S2a 八态全量） */
 const STATUS_OPTIONS: { value: TicketStatus; label: string }[] = (
-  ['DRAFT', 'SPEC_READY', 'DISPATCHED', 'IN_PROGRESS', 'DONE', 'CANCELLED'] as TicketStatus[]
+  ['DRAFT', 'SPEC_READY', 'DISPATCHED', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'CANCELLED', 'FAILED'] as TicketStatus[]
 ).map((s) => ({ value: s, label: statusLabel(s) }));
 
-/** 类型筛选项（S1 建单仅支持 STORY/TASK） */
-const TYPE_OPTIONS: { value: TicketType; label: string }[] = (['STORY', 'TASK'] as TicketType[]).map((t) => ({
-  value: t,
-  label: typeLabel(t),
-}));
+/** 建单可选项（S1 起仅 STORY/TASK；BLOCKER 由卡点升级自动创建，DREAM 未启用） */
+const CREATABLE_TYPES: ('STORY' | 'TASK')[] = ['STORY', 'TASK'];
+
+/** 类型筛选项：建单全集 + BLOCKER（卡点队列入口，spec §5） */
+const TYPE_OPTIONS: { value: TicketType; label: string }[] = (
+  ['STORY', 'TASK', 'BLOCKER'] as TicketType[]
+).map((t) => ({ value: t, label: typeLabel(t) }));
 
 type CreateFormValues = {
   type: 'STORY' | 'TASK';
@@ -179,8 +181,8 @@ export default function TicketListPage() {
         onCancel={() => setCreateOpen(false)}
       >
         <Form form={form} layout="vertical" initialValues={{ type: 'STORY' }}>
-          <Form.Item name="type" label="类型" rules={[{ required: true }]} tooltip="S1 仅支持 STORY / TASK；STORY 可挂子单">
-            <Select options={TYPE_OPTIONS} />
+          <Form.Item name="type" label="类型" rules={[{ required: true }]} tooltip="仅支持 STORY / TASK；STORY 可挂子单">
+            <Select options={CREATABLE_TYPES.map((t) => ({ value: t, label: typeLabel(t) }))} />
           </Form.Item>
           <Form.Item name="title" label="标题" rules={[{ required: true, message: '标题不能为空' }]}>
             <Input placeholder="一句话说明这个工单" />

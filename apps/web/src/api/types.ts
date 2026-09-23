@@ -10,16 +10,18 @@
 /** 工单类型（§1：S1 实际仅使用 STORY / TASK；BLOCKER/DREAM 为枚举全集占位） */
 export type TicketType = 'STORY' | 'TASK' | 'BLOCKER' | 'DREAM';
 
-/** 工单状态（M1 六态，§2.1 转移白名单为唯一合法边集） */
+/** 工单状态（S2a 八态：六态之上扩展 BLOCKED(pending:l3)/FAILED，转移边见 server 状态机） */
 export type TicketStatus =
   | 'DRAFT'
   | 'SPEC_READY'
   | 'DISPATCHED'
   | 'IN_PROGRESS'
+  | 'BLOCKED'
   | 'DONE'
-  | 'CANCELLED';
+  | 'CANCELLED'
+  | 'FAILED';
 
-/** 工单实体（§3 契约底部定义） */
+/** 工单实体（§3 契约底部定义；S2a 增 round 执行轮次/pendingLabel 卡点层级） */
 export interface Ticket {
   id: number;
   type: TicketType;
@@ -29,6 +31,10 @@ export interface Ticket {
   parentId: number | null;
   specContent: string | null;
   workerId: string | null;
+  /** 执行轮次（spawn 起算，首轮 1；未执行为 0） */
+  round: number;
+  /** 卡点层级标签（'l3'，仅 BLOCKED 态非空；S3 扩 'agent'） */
+  pendingLabel: string | null;
   /** 毫秒时间戳 */
   createdAt: number;
   /** 毫秒时间戳 */
@@ -64,7 +70,7 @@ export interface TicketTransition {
   createdAt: number;
 }
 
-/** 详情响应（§3.3） */
+/** 详情响应（§3.3；S2a 增量：执行/报告/commit 关联/卡点单） */
 export interface TicketDetail {
   ticket: Ticket;
   /** 子单列表 */
@@ -77,6 +83,91 @@ export interface TicketDetail {
   transitions: TicketTransition[];
   /** 存在 CANCELLED 子单时 true——A7 提示锚点，前端据此渲染告警条 */
   hasCancelledChildren: boolean;
+  /** 当前绑定 worker 的展示名（Registry 注册名；未绑定为 null） */
+  workerName: string | null;
+  /** 当前轮执行信息（spawn 发起后非 null，进程结束置 null；null 不代表无历史轮） */
+  execution: TicketExecution | null;
+  /** 工单级 commit 关联（各轮新增并集，按轮落库） */
+  commits: TicketCommit[];
+  /** 最大轮完成报告（从未产出报告为 null） */
+  report: TicketReport | null;
+  /** 未关 BLOCKER 单（BLOCKED 存续期间恰好关联一张；其余态为 null） */
+  blocker: Ticket | null;
+}
+
+/** 当前轮执行信息 */
+export interface TicketExecution {
+  /** 当前轮 spawn 时间（毫秒时间戳） */
+  startedAt: number;
+}
+
+/** commit 关联（worker 各轮 git 实测归集；报告 commits 仅作交叉校验不直接采信） */
+export interface TicketCommit {
+  /** 产出该 commit 的执行轮次 */
+  round: number;
+  sha: string;
+}
+
+/** 完成报告（worker 在 worktree 根写 atd-report.json，编排层 zod 校验后落库） */
+export interface TicketReport {
+  round: number;
+  /** 'done' 正常完成 / 'blocked' 卡点升级 */
+  status: 'done' | 'blocked';
+  /** 一句话完成摘要（done 时非空） */
+  summary: string | null;
+  /** 卡点说明（blocked 时非空）：上下文+建议选项+影响面 */
+  blockReason: string | null;
+}
+
+/** Registry 中的 worker 档案（GET /api/workers 列表项） */
+export interface WorkerInfo {
+  /** profile 唯一标识（放行/改派时的 workerId） */
+  id: string;
+  /** 展示名 */
+  name: string;
+  /** 协议（S2a 仅 spawn-cli） */
+  protocol: string;
+  /** 能力集（S2a 仅 task；interactive 随 S2b） */
+  capabilities: string[];
+}
+
+/** 统一事件流（@atd/worker-core events.ts 的 API 形态，手抄同步；字段按 UI 消费最小集宽松定义） */
+export interface UnifiedEvent {
+  type:
+    | 'text-start'
+    | 'text-delta'
+    | 'text-end'
+    | 'tool-call'
+    | 'tool-result'
+    | 'finish'
+    | 'turn-start'
+    | 'turn-end'
+    | (string & {});
+  /** 事件时间戳（毫秒，字段缺失时不展示时间） */
+  timestamp?: number;
+  /** text-delta：文本增量 */
+  text?: string;
+  /** tool-call / tool-result：工具名（不展开参数） */
+  tool?: string;
+  /** tool-result：工具执行出错标记 */
+  errored?: boolean;
+}
+
+/** 执行日志响应（GET /api/tickets/:id/logs） */
+export interface LogsResponse {
+  /** 实际返回的轮次（请求缺省时为当前轮） */
+  round: number;
+  events: UnifiedEvent[];
+}
+
+/** 卡点裁决请求（POST /api/tickets/:blockerId/resolve） */
+export interface ResolveBlockerRequest {
+  /** continue=继续（原 worktree 换轮重跑）/ reassign=改派（复用 worktree 换 worker）/ abort=终止（父单 FAILED） */
+  resolution: 'continue' | 'reassign' | 'abort';
+  /** 裁决留言（落 BLOCKER 单） */
+  note?: string;
+  /** resolution=reassign 时必填：新 worker id */
+  reassignWorkerId?: string;
 }
 
 /** 建单请求（§3.1；BLOCKER/DREAM 暂不接受创建） */
