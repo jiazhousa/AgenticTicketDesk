@@ -109,6 +109,20 @@ BLOCKER 单关单人裁决：继续（父单恢复）/ 终止（父单 FAILED）
 - 知识库沉淀：审计产出入知识库（Markdown 落盘 + 索引），消费方为后续工单的上下文注入与 spec 生成；**知识库对 worker 开放检索**（MVP：知识库目录路径注入 prompt，worker 以 grep/读文件自主检索加载；进阶：结构化索引+检索端点）——项目知识（AGENTS.md/spec 归档/审计产出）统一此处汇聚
 - 熵治理自动重构为**非目标**（§14）——dream 只审计不修改
 
+### 4.6 Workspace（多项目工作空间，2026-09-24 增补）
+
+ATD 终态是**多项目迭代面板**（不只开发 ATD 自身）——Workspace 为一等实体：
+
+| 字段域 | 内容 |
+|---|---|
+| 声明式来源 | `workspaces/` 目录 yaml（与 workers/ 对称；id/名称、repos 列表） |
+| repos | `[{id, path, role: primary|readable}]`——**primary 主仓**（工单缺省目标，HumanThink 会话 cwd）；readable 可读仓（编排 agent 调研范围白名单） |
+| 可读范围控制 | workspace.repos 即白名单：编排 agent（S2b1 interactive 实例权限注入）与 worker 执行的目标仓都必须 ∈ workspace 声明 |
+| 工单挂载 | 工单必属一个 workspace；TASK 可指定目标仓 repoRef（缺省=主仓）——跨仓 Story 的 Task 链基础（如「三仓修改并行→链路测试→MR」） |
+| 向后兼容 | 无 workspaces/ 目录时自动合成 default workspace（主仓=config.repoPath）——S2a 单仓形态零迁移 |
+| 知识库挂载点 | workspace 维度的知识目录（AGENTS.md/spec 归档/审计沉淀，§4.5），S4 落地 |
+
+
 ## 5. 工单状态机
 
 ```
@@ -175,15 +189,17 @@ packages/
 |---|---|---|---|
 | **S1** 核心域骨架 | 工单 CRUD/状态机（M1 裁剪版）/DAG 数据模型/留言/SQLite/API + 最小看板（列表/详情/流转/留言） | — | ① 手工建父子工单并走完 DRAFT→DONE 全程 ② 非法状态转移被 API 拒绝 ③ 留言双向可读 ④ 看板列表/详情/流转操作可用 |
 | **S2a** Worker 层+解单闭环 | worker-core 接口 + Registry（yaml）+ worker-opencode task 模式 + worktree 管理 + 卡点路由（L1 留痕/L2 基础调度/**L3+BLOCKED(pending:l3)+BLOCKER 单**） | S1 | ① 建 TASK 单→DISPATCHED→opencode 在 worktree 解单→commit→DONE 全链 ② MUST-1/2/5/6 生效（无 worktree 拒派/权限注入/日志落盘/凭据环境变量注入）③ 完成报告 schema 化（含 commit 列表）④ worker 崩溃→FAILED 可复现 ⑤ worker 报卡点→L3 路径生效：父单 BLOCKED(pending:l3)+BLOCKER 单创建，人关 BLOCKER 裁决（继续/终止/改派）三路恢复正确 |
-| **S2b** HumanThink+编排层 | interactive 模式（attach serve）+ 消息 server 镜像 + 聊天 UI + **编排 agent（Oracle worker 化：oracle/explorer agent 定义+profile {{agent}} 变量）自动拆单链**：对话→调研→spec→impl→Task DAG（并行/串行泳道）→自动建单 | S2a | ① 聊天框选 opencode 承载，流式渲染（text-delta）② 会话历史入库可检索 ③ 会话中产出 spec 草稿并可编辑 ④ 放行→自动建单（含快照）⑤ 换 worker profile 承载新会话不丢旧历史 |
+| **S2w1** Workspace 多项目基座 | workspace 模型（workspaces/ 声明式 yaml，repos 主从声明）+ 工单挂 workspace + TASK 目标仓 repoRef + worker 按仓开 worktree + 前端 workspace 切换器 + 存量零迁移兼容 | S2a | ① 声明两个 workspace（各含主仓+可读仓），切换后建单/执行互不串仓 ② TASK 指定非主仓 repoRef → worktree 建在该仓、分支/日志按仓隔离 ③ 无 workspaces/ 目录时合成 default workspace，S2a 既有行为与存量工单零迁移可用 |
+| **S2b1** HumanThink 聊天框 | interactive 模式（standalone 实例池，cwd=workspace 主仓，可读仓范围注入权限）+ 消息 server 镜像 + 聊天 UI | S2w1 | ① 聊天框选 opencode 承载，流式渲染（text-delta）② 会话历史入库可检索 ③ 实例与用户共享 server 零干扰（standalone）④ 可读范围受 workspace 白名单约束 |
+| **S2b2** 编排 agent 拆单链 | oracle/explorer agent 定义 + profile {{agent}} 变量 + 对话→调研→spec+跨仓 Task DAG 草稿 → **人工确认门** → 建单建链（预绑定+依赖）→ 泳道呈现 | S2b1 | ① 会话中产出 spec+DAG 草稿（Task 含 repoRef/workerId/依赖）可编辑 ② 确认门放行→自动建单（含快照+预绑定），编排链自动流转生效 ③ 跨仓 DAG（如三仓并行→测试→MR）各 Task 在正确仓执行 |
 | **S3** 并行+pending:agent | worktree 池 + 并发闸门 + 文件集不相交校验 + BLOCKED(pending:agent) 重试引擎（上限→自动升级 l3）+ 卡点队列 UI（BLOCKER 聚合视图） | S2a | ① 两 TASK 单并行解单互不干扰（文件集相交被拒）② pending:agent 超限自动升级 BLOCKER ③ 并发闸门限流可配 |
 | **S4** 夜间审计 | DREAM 工单 + cron 调度 + diff 抽取（commit 关联）+ specLive 比对 + drift 三分支归因 + 知识库沉淀 | S3 | ① 定时窗口自动产出 DREAM 单并执行 ② 三分支归因各有构造用例验证 ③ 无放行记录的私改产生 BLOCKER ④ 知识库落盘可被新工单 spec 生成引用 |
 
-依赖关系：S1 → S2a → {S2b, S3}（S2b 与 S3 互相独立，可任意顺序或并行）→ S4。
+依赖关系：S1 → S2a → S2w1 → {S2b1 → S2b2, S3}（S2b 链与 S3 互相独立，可任意顺序或并行）→ S4。
 
 工作量预估：Epic 级不预估（用户决策）；各 Story 在其 spec 阶段给出文件级任务切分与工作量。
 
-里程碑映射：**M1 = S1+S2a+S2b**（最小闭环：聊天提单→解单→关单）；**M2 = S3**；**M3 = S4**；M4（GitHub Issues 同步）非本 Epic。
+里程碑映射：**M1 = S1+S2a+S2w1+S2b1+S2b2**（最小闭环：聊天提单→拆单→解单→关单）；**M2 = S3**；**M3 = S4**；M4（GitHub Issues 同步）非本 Epic。
 
 ## 10. Epic 级验收标准（狗粮标准）
 
