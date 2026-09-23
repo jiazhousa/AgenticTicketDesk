@@ -45,3 +45,11 @@ pnpm -F @atd/worker-core test     # profile 校验 / Registry 测试
 pnpm -F @atd/worker-opencode test # 事件映射测试
 pnpm -F @atd/web build            # 前端类型检查 + 构建
 ```
+
+## 升级纪律（自举场景：用 ATD 开发 ATD）
+
+运行实例与 worker 产出物理隔离（worker 改的是 worktree 分支，碰不到运行进程与 DB），部署=显式重启加载新代码。重启前三步：
+
+1. `bash .specpipe/fence.sh` 全绿才合 main
+2. 备份 DB：`cp apps/server/data/atd.db apps/server/data/atd.db.bak`
+3. 起不来就 `git revert` 回上一可启动版本；涉 migration 的大改动先双实例冒烟（新代码 + DB 副本起第二端口验证后再切换）
