@@ -9,8 +9,7 @@ import type {
   TicketReportInfo,
 } from '../domain/ticket-service.js';
 
-/**
- * §3 API 契约的 TypeScript 形态——块 B（前端）以此为参照手抄同步，不跨包 import。
+/** §3 API 契约的 TypeScript 形态——块 B（前端）以此为参照手抄同步，不跨包 import。
  * 统一包裹：成功=资源 JSON 本体；失败=ApiErrorEnvelope。
  */
 export type { Status as TicketStatus, TicketType };
@@ -18,6 +17,33 @@ export type { Ticket, TicketListItem, Comment, Transition, TicketDetail, TicketC
 export type TicketListResponse = { items: TicketListItem[] };
 export type ApiErrorBody = { code: string; message: string; details?: string[] };
 export type ApiErrorEnvelope = { error: ApiErrorBody };
+
+/** workspace 声明视图（path=解析后绝对路径；primary=主仓 repo id 冗余便于前端） */
+export type WorkspaceRepo = { id: string; path: string; role: 'primary' | 'readable' };
+export type WorkspaceInfo = {
+  id: string;
+  name: string;
+  repos: WorkspaceRepo[];
+  primary: string;
+  ticketCount: number;
+};
+/** GET /api/workspaces / GET /api/workspaces/:id 响应（未知 id → 404） */
+export type WorkspacesResponse = { workspaces: WorkspaceInfo[] };
+export type WorkspaceDetailResponse = { workspace: WorkspaceInfo };
+
+/** POST /api/tickets 建单请求体（workspaceId/repoRef 均可选；校验规则见 spec FR-3/FR-4） */
+export type CreateTicketBody = {
+  type: TicketType;
+  title: string;
+  description?: string;
+  parentId?: number;
+  workerId?: string;
+  workspaceId?: string;
+  repoRef?: string;
+};
+
+/** GET /api/tickets 查询参数（workspaceId 可选过滤，不传=全量） */
+export type TicketListQuery = { status?: Status; type?: TicketType; workspaceId?: string };
 
 /** POST /api/tickets/:id/dependencies 成功响应 */
 export type AddDependencyResponse = { ok: true };

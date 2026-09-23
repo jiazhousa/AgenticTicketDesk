@@ -33,11 +33,16 @@ const createBody = z.object({
   parentId: z.number().int().positive().optional(),
   /** 预绑定 worker（仅 TASK；编排链拆单场景，自动放行前提） */
   workerId: z.string().optional(),
+  /** 所属 workspace（缺省 atd；带父单时强制继承父值）——值域校验在 service（∈registry） */
+  workspaceId: z.string().optional(),
+  /** TASK 目标仓 id（缺省=所属 workspace 主仓）——值域校验在 service（∈workspace repos） */
+  repoRef: z.string().optional(),
 });
 
 const listQuery = z.object({
   status: emptyAsUndefined(z.enum(TICKET_STATUSES)).optional(),
   type: emptyAsUndefined(z.enum(TICKET_TYPES)).optional(),
+  workspaceId: emptyAsUndefined(z.string()).optional(),
 });
 
 // 编辑仅 DRAFT 态可用；至少提供一个字段
@@ -79,10 +84,14 @@ export function registerTicketRoutes(
     return reply.code(201).send(ticket);
   });
 
-  // GET /api/tickets?status=&type= —— 列表（createdAt DESC）
+  // GET /api/tickets?status=&type=&workspaceId= —— 列表（createdAt DESC）
   app.get('/api/tickets', async (req) => {
     const query = parse(listQuery, req.query);
-    return { items: service.listTickets(query as { status?: Status; type?: TicketType }) };
+    return {
+      items: service.listTickets(
+        query as { status?: Status; type?: TicketType; workspaceId?: string },
+      ),
+    };
   });
 
   // GET /api/tickets/:id —— 详情聚合（+编排层补充：workerName / 当前轮 spawn 时间）

@@ -14,7 +14,11 @@ export type ErrorCode =
   | 'WORKTREE_SETUP'
   | 'MANUAL_FORBIDDEN'
   | 'RESOLUTION_INVALID'
-  | 'PROMPT_TOO_LONG';
+  | 'PROMPT_TOO_LONG'
+  | 'WORKSPACE_UNKNOWN'
+  | 'REPO_REF_INVALID'
+  | 'REPO_REF_DRIFTED'
+  | 'CROSS_WORKSPACE';
 
 export const ERROR_STATUS: Record<ErrorCode, number> = {
   NOT_FOUND: 404,
@@ -32,6 +36,10 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   MANUAL_FORBIDDEN: 422,
   RESOLUTION_INVALID: 422,
   PROMPT_TOO_LONG: 422,
+  WORKSPACE_UNKNOWN: 422,
+  REPO_REF_INVALID: 422,
+  REPO_REF_DRIFTED: 422,
+  CROSS_WORKSPACE: 422,
 };
 
 /** 领域错误：details 为人类可读明细数组（如未完成依赖单清单） */

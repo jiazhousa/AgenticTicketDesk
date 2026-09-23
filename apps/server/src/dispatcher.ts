@@ -12,6 +12,7 @@ import { startRun, renderTemplate, type RoundResult, type StartedRun } from './e
 import { buildPermConfig, buildPermJson } from './perm-config.js';
 import { listNewCommits, readReport } from './report.js';
 import type { WorktreeManager } from './worktree.js';
+import type { WorkspaceRegistry } from './workspaces.js';
 
 /** 内存调度：单进程 Map 记录在执行轮（无队列，池化随后续版本） */
 type RunningRound = { ticketId: number; round: number; pid: number; startedAt: number };
@@ -22,6 +23,8 @@ export type DispatcherDeps = {
   registry: WorkerRegistry;
   config: AppConfig;
   worktree: WorktreeManager;
+  /** workspace 注册表：按工单挂载解析目标仓路径（跨仓执行的地基） */
+  workspaces: WorkspaceRegistry;
   /** 缺省 true：放行后自动触发 spawn；测试上下文可关闭以确定时序 */
   autoDispatch?: boolean;
   /** 测试注入：覆盖 profile timeoutMin 的超时毫秒数 */
@@ -70,7 +73,7 @@ export class Dispatcher {
 
   /** 单轮执行；返回 true=报告缺失且重试未耗尽（L2 重试） */
   private async runOnce(ticketId: number): Promise<boolean> {
-    const { service, registry, config, worktree } = this.deps;
+    const { service, registry, config, worktree, workspaces } = this.deps;
     let run: StartedRun | null = null;
     try {
       const ticket = service.getTicket(ticketId);
@@ -81,9 +84,17 @@ export class Dispatcher {
       if (!profile) {
         throw new Error(`worker 未注册或未绑定：${ticket.workerId ?? '(null)'}`);
       }
+      // 步 0：按工单挂载解析目标仓（yaml 漂移解析失败 → 既有 preSpawnFail→CANCELLED 可重派，
+      // 与 user 放行通道的 422 REPO_REF_DRIFTED 分流——系统通道给可重派状态而非人工修复指引）
+      const repoPath = workspaces.resolveRepoPath(ticket.workspaceId, ticket.repoRef);
+      if (repoPath == null) {
+        throw new Error(
+          `目标仓解析失败：workspace=${ticket.workspaceId} repoRef=${ticket.repoRef ?? '(null)'}（workspaces yaml 声明已变更，修正后重派）`,
+        );
+      }
 
       // 步 1：建/复用 worktree
-      const wtPath = worktree.allocate(ticketId);
+      const wtPath = worktree.allocate(ticketId, repoPath);
       // 步 2：清陈旧报告（防复用误读）→ 基线 → prompt 文件
       rmSync(path.join(wtPath, 'atd-report.json'), { force: true });
       const baseline = worktree.baseline(wtPath);

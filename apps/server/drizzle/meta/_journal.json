@@ -15,6 +15,13 @@
       "when": 1790147908941,
       "tag": "0001_s2a",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790160854135,
+      "tag": "0002_s2w1",
+      "breakpoints": true
     }
   ]
 }

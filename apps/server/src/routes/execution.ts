@@ -99,7 +99,16 @@ export function registerExecutionRoutes(
         `工单 #${id} 当前为 ${ticket.status}（须终态方可回收；BLOCKED 存续期 worktree 保留供裁决复用）`,
       );
     }
-    runtime.worktree.reclaim(id, keepBranch);
+    // 回收仓路径按工单挂载解析（yaml 已删该 repo 声明时反查不可得 → 422 给修复指引）
+    const repoPath = runtime.workspaces.resolveRepoPath(ticket.workspaceId, ticket.repoRef);
+    if (repoPath == null) {
+      throw new AppError(
+        'REPO_REF_DRIFTED',
+        `repoRef 已失效：workspace=${ticket.workspaceId} repoRef=${ticket.repoRef ?? '(null)'}（workspaces yaml 声明已变更，无法定位回收目标仓）`,
+        ['修正 workspaces/*.yaml 恢复该仓声明后重试回收', '或确认该 worktree 目录已无保留价值后手动清理'],
+      );
+    }
+    runtime.worktree.reclaim(id, repoPath, keepBranch);
     return { ok: true };
   });
 

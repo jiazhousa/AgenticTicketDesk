@@ -10,15 +10,18 @@ import type * as schema from './db/schema.js';
 import { registerExecutionRoutes } from './routes/execution.js';
 import { registerTicketRoutes } from './routes/tickets.js';
 import { registerWorkerRoutes } from './routes/workers.js';
+import { registerWorkspaceRoutes } from './routes/workspaces.js';
 import { WorktreeManager } from './worktree.js';
+import { WorkspaceRegistry } from './workspaces.js';
 
-/** 编排运行时（service/dispatcher/worktree/registry 由 buildServer 组装） */
+/** 编排运行时（service/dispatcher/worktree/registry/workspaces 由 buildServer 组装） */
 export type AppRuntime = {
   service: TicketService;
   dispatcher: Dispatcher;
   registry: WorkerRegistry;
   config: AppConfig;
   worktree: WorktreeManager;
+  workspaces: WorkspaceRegistry;
   autoDispatch: boolean;
 };
 
@@ -26,6 +29,8 @@ export type AppRuntime = {
 export type RuntimeOptions = {
   config: AppConfig;
   registry: WorkerRegistry;
+  /** workspace 注册表（loadWorkspaces 产物；测试 fixture 与生产统一走该入口——D2） */
+  workspaces: WorkspaceRegistry;
   /** 缺省 true：放行后自动 spawn；测试上下文关闭以确定时序 */
   autoDispatch?: boolean;
   /** 测试注入：覆盖 profile timeoutMin 的超时毫秒数 */
@@ -44,10 +49,12 @@ export function buildApp(db: BetterSQLite3Database<typeof schema>, runtime?: App
   // 本地单用户，放开跨域便于浏览器直连调试
   void app.register(cors);
 
-  const service = runtime?.service ?? new TicketService(db);
+  // 无 runtime 的退化分支（纯路由信封测试）：空注册表——建单即 WORKSPACE_UNKNOWN，尽早暴露误用
+  const service = runtime?.service ?? new TicketService(db, new WorkspaceRegistry());
   registerTicketRoutes(app, service, runtime);
   registerWorkerRoutes(app, runtime);
   registerExecutionRoutes(app, service, runtime);
+  registerWorkspaceRoutes(app, runtime);
 
   app.setErrorHandler((err: FastifyError, _req, reply) => {
     if (err instanceof AppError) {
@@ -73,18 +80,20 @@ export function buildApp(db: BetterSQLite3Database<typeof schema>, runtime?: App
 }
 
 /**
- * 组装完整编排运行时（service 带放行三件套 guards + dispatcher + worktree 管理器）并构建应用。
+ * 组装完整编排运行时（service 带放行四件套 guards + dispatcher + worktree 管理器）并构建应用。
+ * 装配顺序：workspaces（由调用方 loadWorkspaces 产物经 opts 传入，先于一切）→ worktree → dispatcher → routes。
  * 测试上下文与生产入口共用。
  */
 export function buildServer(
   db: BetterSQLite3Database<typeof schema>,
   opts: RuntimeOptions,
 ): { app: FastifyInstance; runtime: AppRuntime; worktree: WorktreeManager } {
-  const worktree = new WorktreeManager(opts.config.repoPath, opts.config.dataDir);
-  const { registry } = opts;
-  const service = new TicketService(db, {
+  const { registry, workspaces } = opts;
+  const worktree = new WorktreeManager(opts.config.dataDir);
+  const service = new TicketService(db, workspaces, {
     knownWorkerIds: () => registry.ids(),
-    assertWorktreeReady: opts.worktreeGuard === 'skip' ? () => {} : () => worktree.assertReady(),
+    assertWorktreeReady:
+      opts.worktreeGuard === 'skip' ? () => {} : (id: number, repoPath: string) => worktree.assertReady(repoPath),
   });
   const autoDispatch = opts.autoDispatch ?? true;
   const dispatcher = new Dispatcher({
@@ -93,6 +102,7 @@ export function buildServer(
     registry,
     config: opts.config,
     worktree,
+    workspaces,
     autoDispatch,
     timeoutOverrideMs: opts.timeoutOverrideMs,
   });
@@ -102,6 +112,7 @@ export function buildServer(
     registry,
     config: opts.config,
     worktree,
+    workspaces,
     autoDispatch,
   };
   return { app: buildApp(db, runtime), runtime, worktree };

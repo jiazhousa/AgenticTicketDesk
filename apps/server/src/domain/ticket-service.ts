@@ -1,7 +1,8 @@
-import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { comments, ticketCommits, ticketDependencies, ticketReports, ticketTransitions, tickets } from '../db/schema.js';
 import type * as schema from '../db/schema.js';
+import type { WorkspaceRegistry } from '../workspaces.js';
 import { AppError } from './errors.js';
 import { TRANSITIONS, isUserEdge, type Status, type TicketType } from './status.js';
 
@@ -15,6 +16,10 @@ export type Ticket = {
   parentId: number | null;
   specContent: string | null;
   workerId: string | null;
+  /** 所属 workspace（建单落库；存量行由 migration DEFAULT 归属 atd） */
+  workspaceId: string;
+  /** TASK 目标仓 id（缺省=所属 workspace 主仓 id，落实际值）；非 TASK 恒 null */
+  repoRef: string | null;
   pendingLabel: string | null;
   round: number;
   createdAt: number;
@@ -84,8 +89,12 @@ export type TransitionOptions = {
 /** 放行前置校验依赖（编排层注入：Registry 与 worktree 可建性） */
 export type DispatchGuards = {
   knownWorkerIds(): Iterable<string>;
-  assertWorktreeReady(ticketId: number): void;
+  /** repoPath 为按工单挂载解析出的目标仓绝对路径（放行四件套之④ worktree 前置沿用此 hook） */
+  assertWorktreeReady(ticketId: number, repoPath: string): void;
 };
+
+/** 缺省 workspace id（与 tickets.workspace_id 列 DEFAULT 一致；atd.yaml 为仓内自带声明） */
+const DEFAULT_WORKSPACE_ID = 'atd';
 
 /** spec 快照长度上限（prompt=spec+执行要求，超限在冻结点拦截） */
 const MAX_SPEC_BYTES = 128 * 1024;
@@ -110,10 +119,15 @@ function pendingLabel(t: Ticket): string {
 export class TicketService {
   constructor(
     private readonly db: BetterSQLite3Database<typeof schema>,
+    private readonly workspaces: WorkspaceRegistry,
     private readonly guards?: DispatchGuards,
   ) {}
 
-  /** 建单（初始态固定 DRAFT）；parentId 必须指向存在的 STORY，且仅 TASK 可有父 */
+  /**
+   * 建单（初始态固定 DRAFT）；parentId 必须指向存在的 STORY，且仅 TASK 可有父。
+   * workspaceId 缺省 atd；带 parentId 的 TASK 强制继承父单 workspace（异值 422）。
+   * repoRef 仅 TASK 可传，缺省=所属 workspace 主仓 id 且落库实际值（DB 无 NULL 歧义）。
+   */
   createTicket(input: {
     type: TicketType;
     title: string;
@@ -121,12 +135,17 @@ export class TicketService {
     parentId?: number | null;
     /** 预绑定 worker（仅 TASK；编排链拆单时定 worker 的语义——自动放行的前提） */
     workerId?: string | null;
+    /** 所属 workspace（缺省 atd；带父单时强制继承父值，显式异值拒绝） */
+    workspaceId?: string;
+    /** TASK 目标仓 id（∈所属 workspace repos；缺省=主仓 id） */
+    repoRef?: string;
   }): Ticket {
     return this.db.transaction((tx) => {
       // 预绑定校验：worker 必须已注册（防自动放行链 spawn 时才失败）
       if (input.workerId && this.guards && !new Set(this.guards.knownWorkerIds()).has(input.workerId)) {
         throw new AppError('WORKER_UNKNOWN', `worker 未注册：${input.workerId}`);
       }
+      let parent: TicketRow | undefined;
       if (input.parentId != null) {
         if (input.type !== 'TASK') {
           throw new AppError(
@@ -135,7 +154,7 @@ export class TicketService {
             [`type=${input.type}`, `parentId=${input.parentId}`],
           );
         }
-        const parent = tx.select().from(tickets).where(eq(tickets.id, input.parentId)).get();
+        parent = tx.select().from(tickets).where(eq(tickets.id, input.parentId)).get();
         if (!parent || parent.type !== 'STORY') {
           throw new AppError(
             'DAG_INVALID',
@@ -143,6 +162,38 @@ export class TicketService {
             [`parentId=${input.parentId}`],
           );
         }
+        // 归属传播：子单强制继承父单 workspace（显式传入不同值拒绝）
+        if (input.workspaceId != null && input.workspaceId !== parent.workspaceId) {
+          throw new AppError(
+            'CROSS_WORKSPACE',
+            `子单必须继承父单 workspace：父单 #${parent.id} 属 ${parent.workspaceId}，传入 ${input.workspaceId}`,
+            [`父 #${parent.id}（${parent.workspaceId}）`, `入参 workspaceId=${input.workspaceId}`],
+          );
+        }
+      }
+      const workspaceId = parent != null ? parent.workspaceId : (input.workspaceId ?? DEFAULT_WORKSPACE_ID);
+      const ws = this.workspaces.get(workspaceId);
+      if (!ws) {
+        throw new AppError(
+          'WORKSPACE_UNKNOWN',
+          `workspace 未声明：${workspaceId}`,
+          [`可选：${this.workspaces.list().map((w) => w.id).join(', ') || '（无）'}`],
+        );
+      }
+      // repoRef 落库语义：TASK 缺省=主仓 id 且落实际值；非 TASK 传入拒绝（无仓语义）
+      let repoRef: string | null = null;
+      if (input.type === 'TASK') {
+        const ref = input.repoRef ?? ws.primary;
+        if (!ws.repos.some((r) => r.id === ref)) {
+          throw new AppError(
+            'REPO_REF_INVALID',
+            `repoRef 不在 workspace ${ws.id} 的仓列表：${ref}`,
+            [`可选：${ws.repos.map((r) => r.id).join(', ')}`],
+          );
+        }
+        repoRef = ref;
+      } else if (input.repoRef != null) {
+        throw new AppError('REPO_REF_INVALID', `仅 TASK 可指定 repoRef（当前类型 ${input.type}）`);
       }
       const now = Date.now();
       const row = tx
@@ -155,6 +206,8 @@ export class TicketService {
           parentId: input.parentId ?? null,
           specContent: null,
           workerId: input.workerId ?? null,
+          workspaceId,
+          repoRef,
           pendingLabel: null,
           round: 0,
           createdAt: now,
@@ -166,11 +219,12 @@ export class TicketService {
     });
   }
 
-  /** 列表（默认排序 createdAt DESC，同毫秒按 id DESC 兜底）；附 childrenCount/parentTitle */
-  listTickets(filter: { status?: Status; type?: TicketType } = {}): TicketListItem[] {
+  /** 列表（默认排序 createdAt DESC，同毫秒按 id DESC 兜底）；附 childrenCount/parentTitle；workspaceId 可选过滤 */
+  listTickets(filter: { status?: Status; type?: TicketType; workspaceId?: string } = {}): TicketListItem[] {
     const conds = [];
     if (filter.status) conds.push(eq(tickets.status, filter.status));
     if (filter.type) conds.push(eq(tickets.type, filter.type));
+    if (filter.workspaceId) conds.push(eq(tickets.workspaceId, filter.workspaceId));
     const rows = this.db
       .select()
       .from(tickets)
@@ -368,7 +422,7 @@ export class TicketService {
    * 状态转移（白名单 + 通道二分 + blockedBy 门 + STORY 聚合门），事务内落 transitions。
    * 判定优先级：to=SPEC_READY 一律 USE_SPEC_ENDPOINT → 不在边表 INVALID_TRANSITION →
    * blockedBy 门（放行最优先）→ user 请求 system 边 MANUAL_FORBIDDEN →
-   * TASK 放行 workerId/Registry/worktree 三件套。
+   * TASK 放行四件套（workerId/Registry/repoRef 复校/worktree）。
    */
   transition(
     id: number,
@@ -407,8 +461,9 @@ export class TicketService {
       if (row.status === 'BLOCKED' && to === 'DONE' && row.type !== 'BLOCKER') {
         throw new AppError('INVALID_TRANSITION', `仅 BLOCKER 可从 BLOCKED 直接关单（当前类型 ${row.type}）`);
       }
-      // ②③ TASK 放行三件套：workerId 必填 → ∈Registry → worktree 可建
-      // （重开场景：未指定新 workerId 时沿用原绑定）
+      // ②③④⑤ TASK 放行四件套（仅 user 通道）：workerId 必填 → ∈Registry → repoRef 复校 → worktree 可建
+      // （重开场景：未指定新 workerId 时沿用原绑定；system 自动放行链不做 repoRef 复校——
+      //  spawn 期解析失败走既有 preSpawnFail→CANCELLED 可重派语义，与人工通道分流）
       if (row.type === 'TASK' && to === 'DISPATCHED' && actor === 'user') {
         const effectiveWorkerId = o.workerId ?? row.workerId;
         if (!effectiveWorkerId) {
@@ -417,7 +472,16 @@ export class TicketService {
         if (o.workerId && this.guards && !new Set(this.guards.knownWorkerIds()).has(o.workerId)) {
           throw new AppError('WORKER_UNKNOWN', `worker 未注册：${o.workerId}`);
         }
-        this.guards?.assertWorktreeReady(id);
+        // repoRef 复校（防建单后 yaml 变更漂移）：workspace 或仓声明已不在注册表即拒
+        const repoPath = this.workspaces.resolveRepoPath(row.workspaceId, row.repoRef);
+        if (repoPath == null) {
+          throw new AppError(
+            'REPO_REF_DRIFTED',
+            `repoRef 已失效：workspace=${row.workspaceId} repoRef=${row.repoRef ?? '(null)'}（workspaces yaml 声明已变更）`,
+            ['修正 workspaces/*.yaml 恢复该仓声明后重试放行', '或裁决终止本单，另建指向现存仓的新工单'],
+          );
+        }
+        this.guards?.assertWorktreeReady(id, repoPath);
       }
       const now = Date.now();
       const updated = tx
@@ -482,6 +546,9 @@ export class TicketService {
           parentId: null,
           specContent: null,
           workerId: null,
+          // workspaceId 继承收口在本单点（从父单行直读，dispatcher 不另写字段）；BLOCKER 无仓语义
+          workspaceId: parent.workspaceId,
+          repoRef: null,
           pendingLabel: 'l3',
           round: 0,
           createdAt: now,
@@ -548,6 +615,14 @@ export class TicketService {
       if (id === blockedByTicketId) {
         throw new AppError('DAG_INVALID', '禁止自依赖', [`#${id}`]);
       }
+      // 同 workspace 约束：blockedBy 边限 workspace 内（跨项目群依赖无法协同放行门）
+      if (self.workspaceId !== target.workspaceId) {
+        throw new AppError(
+          'CROSS_WORKSPACE',
+          '依赖边两侧工单必须属于同一 workspace',
+          [`#${id}（${self.workspaceId}）`, `#${blockedByTicketId}（${target.workspaceId}）`],
+        );
+      }
       const dup = tx
         .select()
         .from(ticketDependencies)
@@ -601,6 +676,16 @@ export class TicketService {
         ),
       )
       .run();
+  }
+
+  /** 各 workspace 工单计数（workspace 列表/详情 API 数据源；无工单的 workspace 不出现键） */
+  countByWorkspace(): Map<string, number> {
+    const rows = this.db
+      .select({ ws: tickets.workspaceId, n: sql<number>`count(*)` })
+      .from(tickets)
+      .groupBy(tickets.workspaceId)
+      .all();
+    return new Map(rows.map((r) => [r.ws, Number(r.n)]));
   }
 
   /** 放行前置门：所有 blockedBy 单须 DONE（CANCELLED 不视为完成，可先删依赖边解除） */

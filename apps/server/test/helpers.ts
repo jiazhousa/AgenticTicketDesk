@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,9 +13,32 @@ import type * as schema from '../src/db/schema.js';
 import type { Dispatcher } from '../src/dispatcher.js';
 import type { TicketService } from '../src/domain/ticket-service.js';
 import type { WorktreeManager } from '../src/worktree.js';
+import { loadWorkspaces, type WorkspaceRegistry } from '../src/workspaces.js';
 
 export const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
 const FIXTURE_WORKERS_DIR = path.join(FIXTURES_DIR, 'workers');
+
+/** fixture workspace 声明形态（path 用绝对路径写入 yaml） */
+export type WorkspaceRepoSpec = { id: string; path: string; role: 'primary' | 'readable' };
+export type WorkspaceSpec = { id: string; name: string; repos: WorkspaceRepoSpec[] };
+
+/** 写一个临时 fixture workspace yaml（与生产 workspaces/*.yaml 同格式） */
+export function writeWorkspaceYaml(workspacesDir: string, spec: WorkspaceSpec): void {
+  const lines = [`id: ${spec.id}`, `name: ${spec.name}`, 'repos:'];
+  for (const r of spec.repos) {
+    lines.push(`  - id: ${r.id}`, `    path: ${r.path}`, `    role: ${r.role}`);
+  }
+  writeFileSync(path.join(workspacesDir, `${spec.id}.yaml`), lines.join('\n') + '\n');
+}
+
+/** 构造临时 repoRoot（含 workspaces/ 目录）并加载（测试与生产统一走 loadWorkspaces 产物——D2） */
+export function buildWorkspaceFixture(specs: WorkspaceSpec[]): { dir: string; registry: WorkspaceRegistry } {
+  const root = mkdtempSync(path.join(tmpdir(), 'atdws-'));
+  const dir = path.join(root, 'workspaces');
+  mkdirSync(dir);
+  for (const s of specs) writeWorkspaceYaml(dir, s);
+  return { dir, registry: loadWorkspaces(root) };
+}
 
 /** 每用例独立内存库 + 服务 + app 三合一上下文 */
 export type TestContext = {
@@ -25,18 +48,29 @@ export type TestContext = {
   registry: WorkerRegistry;
   dispatcher: Dispatcher;
   worktree: WorktreeManager;
+  workspaces: WorkspaceRegistry;
   config: AppConfig;
+  /** atd workspace 主仓绝对路径（worktree 路径断言与 git 操作基准） */
+  repoPath: string;
 };
 
 /**
- * 默认测试上下文：fixture 注册表（id=fake）+ worktree 前置校验跳过 + autoDispatch 关闭
+ * 默认测试上下文：fixture 注册表（id=fake）+ 单 atd workspace + worktree 前置校验跳过 + autoDispatch 关闭
  * （放行只走校验不触发 spawn，时序确定）。需真实执行/真实仓库的用例用 createRealContext。
+ * workspaceSpecs 可注入多 workspace fixture（跨域/跨仓用例）。
  */
-export function createTestContext(): TestContext {
+export function createTestContext(
+  opts: { workspaceSpecs?: WorkspaceSpec[] } = {},
+): TestContext {
   const db = createDatabase(':memory:');
   const registry = loadRegistry(FIXTURE_WORKERS_DIR);
+  // worktreeGuard=skip 时不触达，仅满足 workspace 声明的 path 存在性校验
+  const primaryRepo = mkdtempSync(path.join(tmpdir(), 'atdwr-'));
+  const specs =
+    opts.workspaceSpecs ??
+    [{ id: 'atd', name: 'ATD', repos: [{ id: 'atd', path: primaryRepo, role: 'primary' as const }] }];
+  const { registry: workspaces } = buildWorkspaceFixture(specs);
   const config: AppConfig = {
-    repoPath: path.join(tmpdir(), 'atd-dummy-repo'), // worktreeGuard=skip 时不触达
     dataDir: mkdtempSync(path.join(tmpdir(), 'atdt-')),
     defaultTimeoutMin: 5,
     retryOnReportMiss: 1,
@@ -44,6 +78,7 @@ export function createTestContext(): TestContext {
   const { app, runtime, worktree } = buildServer(db, {
     config,
     registry,
+    workspaces,
     autoDispatch: false,
     worktreeGuard: 'skip',
   });
@@ -54,7 +89,9 @@ export function createTestContext(): TestContext {
     registry,
     dispatcher: runtime.dispatcher,
     worktree,
+    workspaces: runtime.workspaces,
     config: runtime.config,
+    repoPath: workspaces.resolveRepoPath('atd', null)!,
   };
 }
 
@@ -90,6 +127,7 @@ export function writeFixtureProfile(
 /**
  * 真实编排上下文：临时 git 仓 + 临时 dataDir + 自定义 profile 集 + worktree 前置校验真实生效。
  * autoDispatch 缺省关闭（校验型用例）；dispatcher.test 显式开启。
+ * extraRepos 为 atd workspace 追加 readable 仓（跨仓真跑用例：主仓=repoPath）。
  */
 export function createRealContext(
   opts: {
@@ -99,6 +137,7 @@ export function createRealContext(
     retryOnReportMiss?: number;
     repoPath?: string;
     dataDir?: string;
+    extraRepos?: Array<{ id: string; path: string }>;
   } = {},
 ): TestContext {
   const db = createDatabase(':memory:');
@@ -111,14 +150,24 @@ export function createRealContext(
     writeFixtureProfile(workersDir, p);
   }
   const registry = loadRegistry(workersDir);
+  const { registry: workspaces } = buildWorkspaceFixture([
+    {
+      id: 'atd',
+      name: 'ATD',
+      repos: [
+        { id: 'atd', path: repoPath, role: 'primary' },
+        ...(opts.extraRepos ?? []).map((r) => ({ id: r.id, path: r.path, role: 'readable' as const })),
+      ],
+    },
+  ]);
   const { app, runtime, worktree } = buildServer(db, {
     config: {
-      repoPath,
       dataDir,
       defaultTimeoutMin: 5,
       retryOnReportMiss: opts.retryOnReportMiss ?? 1,
     },
     registry,
+    workspaces,
     autoDispatch: opts.autoDispatch ?? false,
     timeoutOverrideMs: opts.timeoutOverrideMs,
   });
@@ -129,7 +178,9 @@ export function createRealContext(
     registry,
     dispatcher: runtime.dispatcher,
     worktree,
+    workspaces: runtime.workspaces,
     config: runtime.config,
+    repoPath,
   };
 }
 
@@ -138,9 +189,9 @@ export function captureError(fn: () => unknown): { code: string; message: string
   try {
     fn();
   } catch (err) {
-    const e = err as { code?: string; message: string; details?: string[] };
+    const e = err as { code?: string; message?: string; details?: string[] };
     if (!e.code) throw new Error(`预期 AppError，实际抛出：${String(err)}`);
-    return { code: e.code, message: e.message, details: e.details };
+    return { code: e.code, message: e.message!, details: e.details };
   }
   throw new Error('预期抛出 AppError，但未抛出');
 }
