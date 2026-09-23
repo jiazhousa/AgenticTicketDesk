@@ -1,9 +1,9 @@
 import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
-import { comments, ticketDependencies, ticketTransitions, tickets } from '../db/schema.js';
+import { comments, ticketCommits, ticketDependencies, ticketReports, ticketTransitions, tickets } from '../db/schema.js';
 import type * as schema from '../db/schema.js';
 import { AppError } from './errors.js';
-import { TRANSITIONS, type Status, type TicketType } from './status.js';
+import { TRANSITIONS, isUserEdge, type Status, type TicketType } from './status.js';
 
 /** 工单视图（API/TS 侧 camelCase） */
 export type Ticket = {
@@ -15,6 +15,8 @@ export type Ticket = {
   parentId: number | null;
   specContent: string | null;
   workerId: string | null;
+  pendingLabel: string | null;
+  round: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -41,7 +43,18 @@ export type Transition = {
   createdAt: number;
 };
 
-/** GET /api/tickets/:id 响应体；hasCancelledChildren 为 A7 前端告警锚点 */
+/** commit 关联（按轮次落库，工单级=各轮并集） */
+export type TicketCommitInfo = { round: number; sha: string };
+
+/** worker 报告（详情取最大轮） */
+export type TicketReportInfo = {
+  round: number;
+  status: string;
+  summary: string;
+  blockReason: string | null;
+};
+
+/** GET /api/tickets/:id 响应体；hasCancelledChildren 为前端告警锚点 */
 export type TicketDetail = {
   ticket: Ticket;
   children: Ticket[];
@@ -49,7 +62,32 @@ export type TicketDetail = {
   comments: Comment[];
   transitions: Transition[];
   hasCancelledChildren: boolean;
+  commits: TicketCommitInfo[];
+  report: TicketReportInfo | null;
+  blocker: Ticket | null;
 };
+
+/** 转移通道与可选载荷；字符串形态（operator）保留兼容旧调用点 */
+export type TransitionOptions = {
+  /** 转移通道：user（人工）/ system（编排）；缺省 user */
+  actor?: 'user' | 'system';
+  /** 落库操作者名，缺省=actor */
+  operator?: string;
+  note?: string | null;
+  /** TASK 放行时绑定的 worker（事务内落 worker_id 列）；改派时更新 */
+  workerId?: string;
+  /** 同时写 round 列（spawn 轮次推进，由编排层传入） */
+  round?: number;
+};
+
+/** 放行前置校验依赖（编排层注入：Registry 与 worktree 可建性） */
+export type DispatchGuards = {
+  knownWorkerIds(): Iterable<string>;
+  assertWorktreeReady(ticketId: number): void;
+};
+
+/** spec 快照长度上限（prompt=spec+执行要求，超限在冻结点拦截） */
+const MAX_SPEC_BYTES = 128 * 1024;
 
 type TicketRow = typeof tickets.$inferSelect;
 type TxCallback = Parameters<BetterSQLite3Database<typeof schema>['transaction']>[0];
@@ -65,11 +103,14 @@ function pendingLabel(t: Ticket): string {
 }
 
 /**
- * 工单核心域服务：CRUD / 状态机 / DAG 校验 / 留言。
+ * 工单核心域服务：CRUD / 状态机 / DAG 校验 / 留言 / BLOCKER 升级。
  * 同步驱动铁则 1：事务回调内只写同步代码（better-sqlite3）。
  */
 export class TicketService {
-  constructor(private readonly db: BetterSQLite3Database<typeof schema>) {}
+  constructor(
+    private readonly db: BetterSQLite3Database<typeof schema>,
+    private readonly guards?: DispatchGuards,
+  ) {}
 
   /** 建单（初始态固定 DRAFT）；parentId 必须指向存在的 STORY，且仅 TASK 可有父 */
   createTicket(input: {
@@ -107,6 +148,8 @@ export class TicketService {
           parentId: input.parentId ?? null,
           specContent: null,
           workerId: null,
+          pendingLabel: null,
+          round: 0,
           createdAt: now,
           updatedAt: now,
         })
@@ -161,7 +204,7 @@ export class TicketService {
     return toTicket(row);
   }
 
-  /** 详情聚合：子单 / blockedBy 依赖 / 留言（正序）/ 转移历史（插入序）/ CANCELLED 子单提示锚点 */
+  /** 详情聚合：子单 / blockedBy 依赖 / 留言（正序）/ 转移历史（插入序）/ commit 关联 / 报告（最大轮）/ 未关 BLOCKER */
   getTicketDetail(id: number): TicketDetail {
     const ticket = this.getTicket(id);
     const children = this.db
@@ -191,6 +234,34 @@ export class TicketService {
       .where(eq(ticketTransitions.ticketId, id))
       .orderBy(asc(ticketTransitions.id))
       .all();
+    const commits = this.db
+      .select({ round: ticketCommits.round, sha: ticketCommits.sha })
+      .from(ticketCommits)
+      .where(eq(ticketCommits.ticketId, id))
+      .orderBy(asc(ticketCommits.round), asc(ticketCommits.id))
+      .all();
+    const reportRow = this.db
+      .select()
+      .from(ticketReports)
+      .where(eq(ticketReports.ticketId, id))
+      .orderBy(desc(ticketReports.round), desc(ticketReports.id))
+      .limit(1)
+      .get();
+    // 未关 BLOCKER：blockedBy 目标中类型为 BLOCKER 且未到终态的单（BLOCKED 存续期恰好一张）
+    const blockerRow = this.db
+      .select({ t: tickets })
+      .from(ticketDependencies)
+      .innerJoin(tickets, eq(ticketDependencies.blockedByTicketId, tickets.id))
+      .where(
+        and(
+          eq(ticketDependencies.ticketId, id),
+          eq(tickets.type, 'BLOCKER'),
+          inArray(tickets.status, ['DRAFT', 'SPEC_READY', 'DISPATCHED', 'IN_PROGRESS', 'BLOCKED']),
+        ),
+      )
+      .orderBy(asc(ticketDependencies.id))
+      .limit(1)
+      .get();
     return {
       ticket,
       children,
@@ -202,6 +273,16 @@ export class TicketService {
         toStatus: r.toStatus as Status,
       })),
       hasCancelledChildren: children.some((c) => c.status === 'CANCELLED'),
+      commits,
+      report: reportRow
+        ? {
+            round: reportRow.round,
+            status: reportRow.status,
+            summary: reportRow.summary,
+            blockReason: reportRow.blockReason,
+          }
+        : null,
+      blocker: blockerRow ? toTicket(blockerRow.t) : null,
     };
   }
 
@@ -242,6 +323,9 @@ export class TicketService {
       if (row.status !== 'DRAFT') {
         throw new AppError('NOT_DRAFT', `仅 DRAFT 态可提交 spec，当前为 ${row.status}`);
       }
+      if (Buffer.byteLength(specContent, 'utf8') > MAX_SPEC_BYTES) {
+        throw new AppError('PROMPT_TOO_LONG', `spec 内容超过 ${MAX_SPEC_BYTES / 1024}KB 上限（prompt 长度约束）`);
+      }
       const now = Date.now();
       const updated = tx
         .update(tickets)
@@ -264,10 +348,21 @@ export class TicketService {
   }
 
   /**
-   * 状态转移（白名单 + blockedBy 门 + STORY 聚合门），事务内落 transitions。
-   * to=SPEC_READY 对任意来源态一律拒绝（USE_SPEC_ENDPOINT），防绕开冻结逻辑。
+   * 状态转移（白名单 + 通道二分 + blockedBy 门 + STORY 聚合门），事务内落 transitions。
+   * 判定优先级：to=SPEC_READY 一律 USE_SPEC_ENDPOINT → 不在边表 INVALID_TRANSITION →
+   * blockedBy 门（放行最优先）→ user 请求 system 边 MANUAL_FORBIDDEN →
+   * TASK 放行 workerId/Registry/worktree 三件套。
    */
-  transition(id: number, to: Status, operator: string, note?: string | null): Ticket {
+  transition(
+    id: number,
+    to: Status,
+    opts?: TransitionOptions | string,
+    legacyNote?: string | null,
+  ): Ticket {
+    const o: TransitionOptions =
+      typeof opts === 'string' ? { operator: opts, note: legacyNote } : (opts ?? {});
+    const actor = o.actor ?? 'user';
+    const operator = o.operator ?? actor;
     return this.db.transaction((tx) => {
       const row = tx.select().from(tickets).where(eq(tickets.id, id)).get();
       if (!row) throw new AppError('NOT_FOUND', `工单 #${id} 不存在`);
@@ -277,16 +372,41 @@ export class TicketService {
       if (!TRANSITIONS[row.status as Status].includes(to)) {
         throw new AppError('INVALID_TRANSITION', `非法转移：${row.status} → ${to}`);
       }
+      // ① blockedBy 门最优先（放行前置，保持既有期望码稳定）
       if (to === 'DISPATCHED') {
         this.assertDependenciesDone(tx, id);
+      }
+      // 通道二分：在边表内但 user 不可达（按 type 分流）→ MANUAL_FORBIDDEN
+      if (actor === 'user' && !isUserEdge(row.type as TicketType, row.status as Status, to)) {
+        throw new AppError(
+          'MANUAL_FORBIDDEN',
+          `人工通道禁止转移：${row.type} 单 ${row.status} → ${to} 由系统通道执行`,
+        );
       }
       if (to === 'DONE' && row.type === 'STORY') {
         this.assertChildrenSettled(tx, id);
       }
+      // ②③ TASK 放行三件套：workerId 必填 → ∈Registry → worktree 可建
+      if (row.type === 'TASK' && to === 'DISPATCHED' && actor === 'user') {
+        if (!o.workerId) {
+          throw new AppError('WORKER_REQUIRED', 'TASK 放行必须指定 workerId');
+        }
+        if (this.guards && !new Set(this.guards.knownWorkerIds()).has(o.workerId)) {
+          throw new AppError('WORKER_UNKNOWN', `worker 未注册：${o.workerId}`);
+        }
+        this.guards?.assertWorktreeReady(id);
+      }
       const now = Date.now();
       const updated = tx
         .update(tickets)
-        .set({ status: to, updatedAt: now })
+        .set({
+          status: to,
+          updatedAt: now,
+          ...(to === 'BLOCKED' ? { pendingLabel: 'l3' } : {}),
+          ...(row.status === 'BLOCKED' && to !== 'BLOCKED' ? { pendingLabel: null } : {}),
+          ...(o.workerId != null ? { workerId: o.workerId } : {}),
+          ...(o.round !== undefined ? { round: o.round } : {}),
+        })
         .where(eq(tickets.id, id))
         .returning()
         .get();
@@ -296,11 +416,78 @@ export class TicketService {
           fromStatus: row.status,
           toStatus: to,
           operator,
-          note: note ?? null,
+          note: o.note ?? null,
           createdAt: now,
         })
         .run();
       return toTicket(updated);
+    });
+  }
+
+  /** 轮次推进（L2 重试/裁决继续：状态保持 IN_PROGRESS，仅 round+1），返回新轮次 */
+  bumpRound(id: number): number {
+    return this.db.transaction((tx) => {
+      const row = tx.select().from(tickets).where(eq(tickets.id, id)).get();
+      if (!row) throw new AppError('NOT_FOUND', `工单 #${id} 不存在`);
+      const updated = tx
+        .update(tickets)
+        .set({ round: row.round + 1, updatedAt: Date.now() })
+        .where(eq(tickets.id, id))
+        .returning()
+        .get();
+      return updated.round;
+    });
+  }
+
+  /**
+   * L3 升级：创建 BLOCKER 单（初始 IN_PROGRESS，绑定「人」）+ 首条留言（system，reason 全文）
+   * + blockedBy 依赖边（父单被 BLOCKER 阻塞）。不建 worktree、不绑 worker。
+   */
+  createBlocker(input: { parentTicketId: number; reason: string }): Ticket {
+    return this.db.transaction((tx) => {
+      const parent = tx.select().from(tickets).where(eq(tickets.id, input.parentTicketId)).get();
+      if (!parent) throw new AppError('NOT_FOUND', `父单 #${input.parentTicketId} 不存在`);
+      const now = Date.now();
+      const blocker = tx
+        .insert(tickets)
+        .values({
+          type: 'BLOCKER',
+          title: `卡点: ${parent.title}`,
+          description: null,
+          status: 'IN_PROGRESS',
+          parentId: null,
+          specContent: null,
+          workerId: null,
+          pendingLabel: null,
+          round: 0,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning()
+        .get();
+      tx.insert(ticketTransitions)
+        .values({
+          ticketId: blocker.id,
+          fromStatus: 'DRAFT',
+          toStatus: 'IN_PROGRESS',
+          operator: 'system',
+          note: '卡点升级自动创建',
+          createdAt: now,
+        })
+        .run();
+      tx.insert(ticketDependencies)
+        .values({ ticketId: parent.id, blockedByTicketId: blocker.id, createdAt: now })
+        .run();
+      tx.insert(comments)
+        .values({
+          ticketId: blocker.id,
+          authorType: 'system',
+          authorName: 'atd',
+          content: input.reason,
+          createdAt: now,
+        })
+        .run();
+      return toTicket(blocker);
     });
   }
 

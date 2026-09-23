@@ -1,0 +1,8 @@
+# 预置 worker：OpenCode task 模式（spawn-cli 协议）
+# {{worktree}} / {{prompt}} 由编排层以参数数组整体替换，不经 shell
+id: opencode
+name: OpenCode
+protocol: spawn-cli
+capabilities: [task]
+command: opencode run --format json --dir {{worktree}} {{prompt}}
+timeoutMin: 30

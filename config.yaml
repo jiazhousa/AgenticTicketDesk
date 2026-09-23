@@ -1,0 +1,9 @@
+# ATD 编排配置（S2a 单仓）
+# repoPath：目标仓路径，相对路径以本文件所在目录（repo 根）为基准；默认指向本仓自身（开发期自吃）
+repoPath: .
+# dataDir：S2a 产物根目录（worktrees/logs/prompts/runtime 四子目录）；~ 展开为用户主目录
+dataDir: ~/.local/share/atd
+# 默认单轮执行超时（分钟）；profile 自带 timeoutMin 时以 profile 为准
+defaultTimeoutMin: 60
+# 报告缺失/格式错误时的重试次数（L2）
+retryOnReportMiss: 1

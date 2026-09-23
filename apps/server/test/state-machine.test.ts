@@ -3,7 +3,11 @@ import type { Status } from '../src/domain/status.js';
 import type { TicketService, Ticket } from '../src/domain/ticket-service.js';
 import { createTestContext, captureError } from './helpers.js';
 
-/** 沿合法路径把工单推进到目标态（DRAFT 起步；终态 DONE/CANCELLED 不在路径上） */
+/**
+ * 沿合法路径把工单推进到目标态（DRAFT 起步；终态 DONE/CANCELLED 不在路径上）。
+ * 通道按 type 自动分流：TASK 的放行步带 workerId、DISPATCHED→IN_PROGRESS/IN_PROGRESS→DONE
+ * 走 system 通道（dispatcher 进/结算进）；STORY 人工边全集保留。
+ */
 function walkTo(service: TicketService, id: number, target: Status): Ticket {
   const NEXT: Partial<Record<Status, Status>> = {
     DRAFT: 'SPEC_READY',
@@ -12,15 +16,24 @@ function walkTo(service: TicketService, id: number, target: Status): Ticket {
     IN_PROGRESS: 'DONE',
   };
   let ticket = service.getTicket(id);
+  const isTask = ticket.type === 'TASK';
   while (ticket.status !== target) {
     const to = NEXT[ticket.status];
     if (!to) throw new Error(`测试助手无法从 ${ticket.status} 推进到 ${target}`);
-    ticket = to === 'SPEC_READY' ? service.submitSpec(id, '# spec') : service.transition(id, to, 'user');
+    if (to === 'SPEC_READY') {
+      ticket = service.submitSpec(id, '# spec');
+    } else if (isTask && to === 'DISPATCHED') {
+      ticket = service.transition(id, to, { actor: 'user', workerId: 'fake' });
+    } else if (isTask && (to === 'IN_PROGRESS' || to === 'DONE')) {
+      ticket = service.transition(id, to, { actor: 'system' });
+    } else {
+      ticket = service.transition(id, to, 'user');
+    }
   }
   return ticket;
 }
 
-describe('状态机：六条合法边【A1】', () => {
+describe('状态机：合法边（TASK 通道二分：user 边带 workerId / 执行边走 system）【A1】', () => {
   test('DRAFT→SPEC_READY（经 submitSpec 唯一入口），快照冻结 + 落一行转移', () => {
     const { service } = createTestContext();
     const t = service.createTicket({ type: 'TASK', title: '任务' });
@@ -32,21 +45,33 @@ describe('状态机：六条合法边【A1】', () => {
     expect(ts[0]).toMatchObject({ fromStatus: 'DRAFT', toStatus: 'SPEC_READY', note: 'submit spec' });
   });
 
+  // TASK 的 user 白名单边（放行需 workerId）
   test.each([
     ['SPEC_READY', 'DISPATCHED'],
     ['SPEC_READY', 'CANCELLED'],
-    ['DISPATCHED', 'IN_PROGRESS'],
     ['DISPATCHED', 'CANCELLED'],
-    ['IN_PROGRESS', 'DONE'],
-  ] as Array<[Status, Status]>)('%s→%s：status 变更 + 落一行转移', (from, to) => {
+  ] as Array<[Status, Status]>)('%s→%s（user 通道）：status 变更 + 落一行转移', (from, to) => {
     const { service } = createTestContext();
     const t = service.createTicket({ type: 'TASK', title: `t-${to}` });
     walkTo(service, t.id, from);
-    const updated = service.transition(t.id, to, 'user', 'note-x');
+    const updated = service.transition(t.id, to, { actor: 'user', workerId: 'fake', note: 'note-x' });
     expect(updated.status).toBe(to);
-    // walkTo 已落 from 之前的转移行，此处断言最后一行即本次转移
     const ts = service.getTicketDetail(t.id).transitions;
     expect(ts.at(-1)).toMatchObject({ fromStatus: from, toStatus: to, note: 'note-x', operator: 'user' });
+  });
+
+  // TASK 的执行边（dispatcher 进/结算进）：system 通道合法
+  test.each([
+    ['DISPATCHED', 'IN_PROGRESS'],
+    ['IN_PROGRESS', 'DONE'],
+  ] as Array<[Status, Status]>)('%s→%s（system 通道）：status 变更 + operator=system', (from, to) => {
+    const { service } = createTestContext();
+    const t = service.createTicket({ type: 'TASK', title: `t-${to}` });
+    walkTo(service, t.id, from);
+    const updated = service.transition(t.id, to, { actor: 'system', note: 'note-x' });
+    expect(updated.status).toBe(to);
+    const ts = service.getTicketDetail(t.id).transitions;
+    expect(ts.at(-1)).toMatchObject({ fromStatus: from, toStatus: to, note: 'note-x', operator: 'system' });
   });
 });
 

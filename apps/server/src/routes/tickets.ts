@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import type { AppRuntime } from '../app.js';
 import { AppError } from '../domain/errors.js';
 import { TICKET_STATUSES, TICKET_TYPES } from '../domain/status.js';
 import type { Status, TicketType } from '../domain/status.js';
@@ -51,6 +52,8 @@ const specBody = z.object({ specContent: z.string().min(1, 'spec 内容不能为
 const transitionBody = z.object({
   to: z.enum(TICKET_STATUSES),
   note: z.string().optional(),
+  /** TASK 放行时绑定的 worker（user 白名单边外均为 system 通道） */
+  workerId: z.string().min(1).optional(),
 });
 
 const commentBody = z.object({ content: z.string().min(1, '留言内容不能为空') });
@@ -62,7 +65,11 @@ const dependencyParams = z.object({
   blockedById: z.coerce.number().int().positive(),
 });
 
-export function registerTicketRoutes(app: FastifyInstance, service: TicketService): void {
+export function registerTicketRoutes(
+  app: FastifyInstance,
+  service: TicketService,
+  runtime?: AppRuntime,
+): void {
   // POST /api/tickets —— 建单（初始态 DRAFT）
   app.post('/api/tickets', async (req, reply) => {
     const body = parse(createBody, req.body);
@@ -76,10 +83,20 @@ export function registerTicketRoutes(app: FastifyInstance, service: TicketServic
     return { items: service.listTickets(query as { status?: Status; type?: TicketType }) };
   });
 
-  // GET /api/tickets/:id —— 详情聚合
+  // GET /api/tickets/:id —— 详情聚合（+编排层补充：workerName / 当前轮 spawn 时间）
   app.get('/api/tickets/:id', async (req) => {
     const { id } = parse(idParams, req.params);
-    return service.getTicketDetail(id);
+    const detail = service.getTicketDetail(id);
+    const workerName = detail.ticket.workerId != null
+      ? (runtime?.registry.get(detail.ticket.workerId)?.name ?? null)
+      : null;
+    // execution.startedAt=最近一次进入 IN_PROGRESS 的转移时间（即当前/最近轮 spawn 时间）
+    const enterExec = [...detail.transitions].reverse().find((t) => t.toStatus === 'IN_PROGRESS');
+    return {
+      ...detail,
+      workerName,
+      execution: enterExec ? { startedAt: enterExec.createdAt } : null,
+    };
   });
 
   // PATCH /api/tickets/:id —— 编辑（仅 DRAFT）
@@ -96,11 +113,19 @@ export function registerTicketRoutes(app: FastifyInstance, service: TicketServic
     return service.submitSpec(id, body.specContent);
   });
 
-  // POST /api/tickets/:id/transition —— 状态转移（operator 固定 'user'，S1 单用户）
+  // POST /api/tickets/:id/transition —— 状态转移（人工通道；TASK 放行触发自动派发）
   app.post('/api/tickets/:id/transition', async (req) => {
     const { id } = parse(idParams, req.params);
     const body = parse(transitionBody, req.body);
-    return service.transition(id, body.to, 'user', body.note);
+    const updated = service.transition(id, body.to, {
+      actor: 'user',
+      note: body.note,
+      workerId: body.workerId,
+    });
+    if (runtime?.autoDispatch && updated.type === 'TASK' && updated.status === 'DISPATCHED') {
+      runtime.dispatcher.onDispatched(updated);
+    }
+    return updated;
   });
 
   // POST /api/tickets/:id/comments —— 留言（S1 固定 user/我）
