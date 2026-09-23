@@ -271,7 +271,7 @@ export class Dispatcher {
         this.deps.service.addComment(ticketId, {
           authorType: 'system',
           authorName: 'atd',
-          content: `派发失败：${reason}，可重新放行`,
+          content: `派发失败：${reason}（本单已取消，为终态；如需重试请基于本单新建工单）`,
         });
       } else if (t.status === 'IN_PROGRESS') {
         this.deps.service.transition(ticketId, 'FAILED', { actor: 'system', note: '执行处置失败' });
@@ -372,7 +372,7 @@ export class Dispatcher {
           service.addComment(row.id, {
             authorType: 'system',
             authorName: 'atd',
-            content: '派发失败：服务重启时停留在派发态，可重新放行',
+            content: '派发失败：服务重启时停留在派发态（本单已取消，为终态；如需重试请基于本单新建工单）',
           });
         }
       } catch (err) {

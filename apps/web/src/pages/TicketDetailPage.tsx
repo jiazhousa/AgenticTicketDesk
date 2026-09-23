@@ -129,7 +129,7 @@ export default function TicketDetailPage() {
         </Card>
 
         {/* 卡2：执行（worker 绑定后；含事件流尾部与 worktree 回收） */}
-        {(ticket.workerId != null || detail.execution != null) && (
+        {ticket.type === 'TASK' && (ticket.workerId != null || ticket.round >= 1) && (
           <WorkerCard
             ticket={ticket}
             workerName={detail.workerName}
