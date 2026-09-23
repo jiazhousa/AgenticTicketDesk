@@ -80,7 +80,7 @@ test/                §7
 - `map-events.ts`：opencode 事件→UnifiedEvent（step_start→turn-start；text→text-start+delta+end；tool_use→tool-call+tool-result(errored=status error)；step_finish→turn-end；exit 0→finish）
 - `parse-line.ts`：单行 JSONL（非 JSON 行跳过计数）
 
-**预置 `workers/opencode.yaml`**（随仓）：id=opencode / spawn-cli / [task] / `opencode run --format json --dir {{worktree}} {{prompt}}` / timeoutMin 30。
+预置 `workers/opencode.yaml`：`command: opencode run --standalone --format json {{prompt}}`（**B1 实证修订**：本机版本 run 无 `--dir` flag；`--standalone` 私有 server 防共享会话串扰；`{{prompt}}` 注入 prompt 全文单参数——文件路径形态会被 opencode 当 usage 错误；工作目录由 spawn cwd+prompt 头部强约束双重保证——opencode 会从 worktree 的 .git gitfile 解析主仓当项目根导致 shell workdir 错位，实证 commit 曾落主仓分支，prompt 约束根治）。timeoutMin 30。
 **`config.yaml`**（随仓，repo 根）。
 
 ## 5. 前端增量（apps/web，契约=§2）

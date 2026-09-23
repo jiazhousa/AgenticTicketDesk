@@ -158,7 +158,7 @@ IN_PROGRESS 语义注记：本 Story 起 IN_PROGRESS 进入点=spawn 发起（Ep
 | MUST | 实现点 |
 |---|---|
 | 1 worktree 硬校验 | 放行前置③ + 运行期失败走 FAILED；绝不裸 spawn |
-| 2 宿主侧权限收口 | 编排层生成临时 opencode 配置（permission deny 对象规则：bash 拒 `git*push*` 等），以**环境变量注入**（OPENCODE_CONFIG 指向临时文件或等效机制——opencode CLI 无 `--config` 旗标，具体键 Builder 按官方文档实测落实并记录 impl）；注入内容出现在 raw 日志可审计 |
+| 2 宿主侧权限收口 | 编排层生成 opencode 配置（permission 对象规则：**bash catch-all allow（无人值守必需——ask 在无头下=auto-reject 全拒，B1 实证 r4）+ 推送类 deny 后置覆盖（last-match-wins）+ edit/write allow**），环境变量注入（OPENCODE_CONFIG_CONTENT 内联优先/OPENCODE_CONFIG 文件 fallback，CONTENT 实测生效——r5 auto-reject 证明注入在管权限）；注入摘要记 raw 首行可审计 |
 | 3 无 push 通道 | 模板校验拒推送 token；ATD 代码零 push 路径 |
 | 4 worktree 编排层独占 | 路径/分支仅 dispatch 与回收 API 触达；spawn cwd 限定 worktree |
 | 5 输出全落盘 | 每轮双 JSONL（t{id}.r{n}.*），关单前不清理 |
