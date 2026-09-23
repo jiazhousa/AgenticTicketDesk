@@ -80,7 +80,6 @@ describe('非法转移 → 422 INVALID_TRANSITION，状态不变且转移日志�
     ['DRAFT', 'DISPATCHED'],
     ['DRAFT', 'IN_PROGRESS'],
     ['DRAFT', 'DONE'],
-    ['DRAFT', 'CANCELLED'],
     ['SPEC_READY', 'IN_PROGRESS'],
     ['SPEC_READY', 'DONE'],
     ['DISPATCHED', 'DONE'],
@@ -133,5 +132,14 @@ describe('终态仅保留重开出边：DONE/CANCELLED 除→DISPATCHED（重开
     }
     expect(service.getTicket(t.id).status).toBe(terminal);
     expect(service.getTicketDetail(t.id).transitions.length).toBe(before);
+  });
+});
+
+describe('DRAFT 取消（终态语义补全：草稿可弃置）', () => {
+  test('DRAFT→CANCELLED user 通道合法', () => {
+    const { service } = createTestContext();
+    const t = service.createTicket({ type: 'TASK', title: '草稿' });
+    const updated = service.transition(t.id, 'CANCELLED', 'user');
+    expect(updated.status).toBe('CANCELLED');
   });
 });

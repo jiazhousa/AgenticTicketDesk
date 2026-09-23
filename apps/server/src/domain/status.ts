@@ -20,7 +20,7 @@ export type TicketType = (typeof TICKET_TYPES)[number];
  * transition() 不接受 to=SPEC_READY。
  */
 export const TRANSITIONS: Record<Status, Status[]> = {
-  DRAFT: ['SPEC_READY'],
+  DRAFT: ['SPEC_READY', 'CANCELLED'],
   SPEC_READY: ['DISPATCHED', 'CANCELLED'],
   DISPATCHED: ['IN_PROGRESS', 'CANCELLED'],
   IN_PROGRESS: ['DONE', 'BLOCKED', 'FAILED'],
@@ -42,6 +42,7 @@ export function isUserEdge(type: TicketType, from: Status, to: Status): boolean 
   if (type === 'STORY') return true;
   if (type === 'TASK') {
     return (
+      (from === 'DRAFT' && to === 'CANCELLED') ||
       (from === 'SPEC_READY' && to === 'DISPATCHED') ||
       (from === 'SPEC_READY' && to === 'CANCELLED') ||
       (from === 'DISPATCHED' && to === 'CANCELLED') ||

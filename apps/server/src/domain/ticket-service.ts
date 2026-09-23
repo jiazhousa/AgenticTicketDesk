@@ -123,6 +123,10 @@ export class TicketService {
     workerId?: string | null;
   }): Ticket {
     return this.db.transaction((tx) => {
+      // 预绑定校验：worker 必须已注册（防自动放行链 spawn 时才失败）
+      if (input.workerId && this.guards && !new Set(this.guards.knownWorkerIds()).has(input.workerId)) {
+        throw new AppError('WORKER_UNKNOWN', `worker 未注册：${input.workerId}`);
+      }
       if (input.parentId != null) {
         if (input.type !== 'TASK') {
           throw new AppError(
