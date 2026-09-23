@@ -20,7 +20,7 @@ describe('WorkerProfile 注册防护【B7】', () => {
 
   test('命令含 git push → 拒绝且报错可读', () => {
     const yaml = LEGAL.replace(
-      'command: opencode run --format json --dir {{worktree}} {{prompt}}',
+      'command: opencode run --standalone --format json {{prompt}}',
       'command: git push origin main',
     );
     expect(() => validateProfile(yaml, 'push.yaml')).toThrowError(/push/);
@@ -28,7 +28,7 @@ describe('WorkerProfile 注册防护【B7】', () => {
 
   test('命令含 remote → 拒绝（推送类 token 全集拦截）', () => {
     const yaml = LEGAL.replace(
-      'command: opencode run --format json --dir {{worktree}} {{prompt}}',
+      'command: opencode run --standalone --format json {{prompt}}',
       'command: git remote -v',
     );
     expect(() => validateProfile(yaml, 'remote.yaml')).toThrowError(/remote/);
@@ -41,7 +41,7 @@ describe('WorkerProfile 注册防护【B7】', () => {
 
   test('含 32 位以上连续随机串 → 拒绝（凭据特征兜底）', () => {
     const yaml = LEGAL.replace(
-      'command: opencode run --format json --dir {{worktree}} {{prompt}}',
+      'command: opencode run --standalone --format json {{prompt}}',
       'command: mycli --token AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
     );
     expect(() => validateProfile(yaml, 'long.yaml')).toThrowError(/凭据/);
