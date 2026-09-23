@@ -6,8 +6,11 @@ import { getTicket, getWorkers, listTickets } from '../api/tickets';
 import type { TicketDetail, TicketListItem, WorkerInfo } from '../api/types';
 import StatusLight from '../components/StatusLight';
 import StatusTag, { TypeTag, statusLabel } from '../components/StatusTag';
+import RepoRefTag from '../components/RepoRefTag';
 import { formatDuration } from '../utils/format';
 import { useInterval, useNow } from '../utils/hooks';
+import { useWorkspace } from '../context/WorkspaceContext';
+import { useWorkspaceMap } from '../utils/workspace';
 
 /** 仪表盘轮询间隔 */
 const POLL_MS = 5000;
@@ -24,13 +27,17 @@ type RunningRow = {
  * ② 执行中 worker 卡片流：按 worker 分组，组内单点开直达日志页（类 CI job 入口）
  */
 export default function DashboardPage() {
+  // 顶栏切换器所选 workspace（null=全部）；切换即触发下方 load 重建重拉
+  const { workspaceId } = useWorkspace();
+  const workspaceMap = useWorkspaceMap();
   const [rows, setRows] = useState<RunningRow[] | null>(null);
   const [workers, setWorkers] = useState<WorkerInfo[]>([]);
 
   const load = useCallback(async () => {
+    // workspaceId 不传=全量（「全部」视图）；两视角同过滤口径
     const [dispatched, inProgress, workerList] = await Promise.all([
-      listTickets({ status: 'DISPATCHED' }).catch(() => ({ items: [] as TicketListItem[] })),
-      listTickets({ status: 'IN_PROGRESS' }).catch(() => ({ items: [] as TicketListItem[] })),
+      listTickets({ status: 'DISPATCHED', workspaceId: workspaceId ?? undefined }).catch(() => ({ items: [] as TicketListItem[] })),
+      listTickets({ status: 'IN_PROGRESS', workspaceId: workspaceId ?? undefined }).catch(() => ({ items: [] as TicketListItem[] })),
       getWorkers().catch(() => [] as WorkerInfo[]),
     ]);
     setWorkers(workerList);
@@ -38,7 +45,7 @@ export default function DashboardPage() {
     const items = [...inProgress.items, ...dispatched.items];
     const details = await Promise.all(items.map((t) => getTicket(t.id).catch(() => null)));
     setRows(items.map((item, i) => ({ item, detail: details[i] })));
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     void load();
@@ -135,6 +142,7 @@ export default function DashboardPage() {
                     <Tag style={{ marginInlineEnd: 0 }}>
                       {detail?.workerName ?? item.workerId ?? '未绑定 worker'}
                     </Tag>
+                    <RepoRefTag ticket={item} workspaceMap={workspaceMap} />
                     <Typography.Text type="secondary">第 {item.round} 轮</Typography.Text>
                     <Typography.Text type={item.status === 'IN_PROGRESS' ? 'warning' : 'secondary'}>
                       {detail?.execution ? formatDuration(now - detail.execution.startedAt) : item.status === 'DISPATCHED' ? '派发中…' : '—'}

@@ -14,8 +14,11 @@ import StatusTag, { TypeTag, statusLabel } from '../components/StatusTag';
 import BlockerCard from '../components/BlockerCard';
 import DispatchForm from '../components/DispatchForm';
 import CreateTicketModal from '../components/CreateTicketModal';
+import RepoRefTag from '../components/RepoRefTag';
 import { formatTime } from '../utils/format';
 import { useInterval } from '../utils/hooks';
+import { useWorkspace } from '../context/WorkspaceContext';
+import { useWorkspaceMap } from '../utils/workspace';
 
 /** 工作台轮询间隔 */
 const POLL_MS = 10000;
@@ -27,6 +30,9 @@ const POLL_MS = 10000;
  * ③ 待处理区：DRAFT / SPEC_READY 单，附「提交 spec / 放行」快捷操作
  */
 export default function WorkbenchPage() {
+  // 顶栏切换器所选 workspace（null=全部）；切换即触发下方 load 重建重拉
+  const { workspaceId } = useWorkspace();
+  const workspaceMap = useWorkspaceMap();
   // 阻塞区数据（status=BLOCKED 一次拉全，前端按类型分流）
   const [blockedItems, setBlockedItems] = useState<TicketListItem[] | null>(null);
   const [blockedDetails, setBlockedDetails] = useState<Map<number, TicketDetail>>(new Map());
@@ -46,10 +52,11 @@ export default function WorkbenchPage() {
   const [dispatchTicket, setDispatchTicket] = useState<Ticket | null>(null);
 
   const load = useCallback(async () => {
+    // workspaceId 不传=全量（「全部」视图）；三区同过滤口径
     const [blocked, draft, ready] = await Promise.all([
-      listTickets({ status: 'BLOCKED' }).catch(() => ({ items: [] as TicketListItem[] })),
-      listTickets({ status: 'DRAFT' }).catch(() => ({ items: [] as TicketListItem[] })),
-      listTickets({ status: 'SPEC_READY' }).catch(() => ({ items: [] as TicketListItem[] })),
+      listTickets({ status: 'BLOCKED', workspaceId: workspaceId ?? undefined }).catch(() => ({ items: [] as TicketListItem[] })),
+      listTickets({ status: 'DRAFT', workspaceId: workspaceId ?? undefined }).catch(() => ({ items: [] as TicketListItem[] })),
+      listTickets({ status: 'SPEC_READY', workspaceId: workspaceId ?? undefined }).catch(() => ({ items: [] as TicketListItem[] })),
     ]);
     setBlockedItems(blocked.items);
     setDraftItems(draft.items);
@@ -71,7 +78,7 @@ export default function WorkbenchPage() {
     });
     setBlockedDetails(map);
     setOrphanBlockers(blockerTickets.filter((b) => !pairedBlockerIds.has(b.id)));
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     void load();
@@ -270,6 +277,7 @@ export default function WorkbenchPage() {
                         <Link to={`/tickets/${t.id}`}>
                           #{t.id} {t.title}
                         </Link>
+                        <RepoRefTag ticket={t} workspaceMap={workspaceMap} />
                         {t.parentId != null && (
                           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                             父单 <Link to={`/tickets/${t.parentId}`}>#{t.parentId}</Link>
