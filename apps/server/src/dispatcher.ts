@@ -279,9 +279,17 @@ export class Dispatcher {
           createdAt: now,
         })
         .run();
-      service.transition(ticketId, 'BLOCKED', { actor: 'system', note: 'worker 报告卡点' });
-      // 首条留言=blockReason 全文
-      service.createBlocker({ parentTicketId: ticketId, reason: reportRead.report.blockReason ?? '' });
+      service.transition(ticketId, 'BLOCKED', {
+        actor: 'system',
+        note: 'worker 报告卡点',
+        blockReason: reportRead.report.blockReason ?? reportRead.report.summary,
+      });
+      // 卡点原因全文留言（时间线可见）
+      service.addComment(ticketId, {
+        authorType: 'system',
+        authorName: 'atd',
+        content: `卡点报告：${reportRead.report.blockReason ?? reportRead.report.summary}`,
+      });
       return false;
     }
 
@@ -289,10 +297,12 @@ export class Dispatcher {
     if (ctx.round <= config.retryOnReportMiss) {
       return true;
     }
-    service.transition(ticketId, 'BLOCKED', { actor: 'system', note: '报告缺失' });
-    service.createBlocker({
-      parentTicketId: ticketId,
-      reason: `报告缺失/格式错误，重试 ${config.retryOnReportMiss} 次后仍失败（round=${ctx.round}）；最后一轮 raw 日志：${ctx.rawPath}`,
+    const missReason = `报告缺失/格式错误，重试 ${config.retryOnReportMiss} 次后仍失败（round=${ctx.round}）；最后一轮 raw 日志：${ctx.rawPath}`;
+    service.transition(ticketId, 'BLOCKED', { actor: 'system', note: '报告缺失', blockReason: missReason });
+    service.addComment(ticketId, {
+      authorType: 'system',
+      authorName: 'atd',
+      content: `卡点判定：${missReason}`,
     });
     return false;
   }
@@ -323,35 +333,17 @@ export class Dispatcher {
   }
 
   /**
-   * BLOCKER 裁决：① note 留言落 BLOCKER ② BLOCKER→DONE（system）③ 按裁决转父单——
-   * 此时 BLOCKER 已 DONE，父单 blockedBy 依赖门天然放行。
+   * 卡点裁决（内联语义：卡点=原单 BLOCKED 状态，无独立卡点单）：
+   * continue=原 worktree 续跑 / reassign=换 worker 续跑 / abort=FAILED 终止。
    */
-  resolveBlocker(
-    blockerId: number,
+  resolveTicket(
+    ticketId: number,
     input: { resolution: 'continue' | 'reassign' | 'abort'; note?: string; reassignWorkerId?: string },
-  ): { blocker: Ticket; parent: Ticket } {    const { service, registry } = this.deps;
-
-    const blockerRow = this.deps.db.select().from(tickets).where(eq(tickets.id, blockerId)).get();
-    if (!blockerRow || blockerRow.type !== 'BLOCKER') {
-      throw new AppError('RESOLUTION_INVALID', `卡点单不存在或不是 BLOCKER：#${blockerId}`);
-    }
-    // BLOCKED=现口径；IN_PROGRESS=历史卡点单兼容（修复前创建，裁决后自然消化）
-    if (blockerRow.status !== 'BLOCKED' && blockerRow.status !== 'IN_PROGRESS') {
-      throw new AppError('RESOLUTION_INVALID', `卡点单已关（当前 ${blockerRow.status}）：#${blockerId}`);
-    }
-    // 父单=被该 BLOCKER 阻塞的单（依赖行：父.id blockedBy blocker.id）
-    const depRow = this.deps.db
-      .select({ parentId: ticketDependencies.ticketId })
-      .from(ticketDependencies)
-      .where(eq(ticketDependencies.blockedByTicketId, blockerId))
-      .limit(1)
-      .get();
-    if (!depRow) {
-      throw new AppError('RESOLUTION_INVALID', `未找到被卡点 #${blockerId} 阻塞的父单`);
-    }
-    const parent = service.getTicket(depRow.parentId);
-    if (parent.status !== 'BLOCKED') {
-      throw new AppError('RESOLUTION_INVALID', `父单当前为 ${parent.status}，非 BLOCKED，无法裁决`);
+  ): Ticket {
+    const { service, registry } = this.deps;
+    const ticket = service.getTicket(ticketId);
+    if (ticket.status !== 'BLOCKED') {
+      throw new AppError('RESOLUTION_INVALID', `仅 BLOCKED 态可裁决（当前 ${ticket.status}）：#${ticketId}`);
     }
     if (input.resolution === 'reassign') {
       if (!input.reassignWorkerId) {
@@ -361,28 +353,25 @@ export class Dispatcher {
         throw new AppError('WORKER_UNKNOWN', `worker 未注册：${input.reassignWorkerId}`);
       }
     }
-
-    // ① 留言（裁决人=当前用户）
+    // 裁决留言（裁决人=当前用户，落原单时间线）
     if (input.note) {
-      service.addComment(blockerId, { authorType: 'user', authorName: '我', content: input.note });
+      service.addComment(ticketId, { authorType: 'user', authorName: '我', content: input.note });
     }
-    // ② BLOCKER 关单
-    service.transition(blockerId, 'DONE', { actor: 'system', note: `裁决：${input.resolution}` });
-    // ③ 父单转移 + 继续执行
     if (input.resolution === 'abort') {
-      service.transition(parent.id, 'FAILED', { actor: 'system', note: '卡点裁决：终止' });
-    } else if (input.resolution === 'continue') {
-      service.transition(parent.id, 'IN_PROGRESS', { actor: 'system', note: '卡点裁决：继续' });
-      void this.startRound(parent.id);
-    } else {
-      service.transition(parent.id, 'DISPATCHED', {
-        actor: 'system',
-        workerId: input.reassignWorkerId,
-        note: '卡点裁决：改派',
-      });
-      void this.startRound(parent.id);
+      return service.transition(ticketId, 'FAILED', { actor: 'system', note: '卡点裁决：终止' });
     }
-    return { blocker: service.getTicket(blockerId), parent: service.getTicket(parent.id) };
+    if (input.resolution === 'continue') {
+      const t = service.transition(ticketId, 'IN_PROGRESS', { actor: 'system', note: '卡点裁决：继续' });
+      void this.startRound(ticketId);
+      return t;
+    }
+    const t = service.transition(ticketId, 'DISPATCHED', {
+      actor: 'system',
+      workerId: input.reassignWorkerId,
+      note: '卡点裁决：改派',
+    });
+    void this.startRound(ticketId);
+    return t;
   }
 
   /**

@@ -21,6 +21,8 @@ export type Ticket = {
   /** TASK 目标仓 id（缺省=所属 workspace 主仓 id，落实际值）；非 TASK 恒 null */
   repoRef: string | null;
   pendingLabel: string | null;
+  /** BLOCKED 存续期的卡点原因（内联卡点语义，无独立卡点单）；非 BLOCKED 恒 null */
+  blockReason: string | null;
   round: number;
   createdAt: number;
   updatedAt: number;
@@ -70,7 +72,6 @@ export type TicketDetail = {
   hasCancelledChildren: boolean;
   commits: TicketCommitInfo[];
   report: TicketReportInfo | null;
-  blocker: Ticket | null;
 };
 
 /** 转移通道与可选载荷；字符串形态（operator）保留兼容旧调用点 */
@@ -82,6 +83,8 @@ export type TransitionOptions = {
   note?: string | null;
   /** TASK 放行时绑定的 worker（事务内落 worker_id 列）；改派时更新 */
   workerId?: string;
+  /** 转 BLOCKED 时落库的卡点原因（worker 报告或系统判定描述）；转出 BLOCKED 自动清空 */
+  blockReason?: string | null;
   /** 同时写 round 列（spawn 轮次推进，由编排层传入） */
   round?: number;
 };
@@ -113,7 +116,7 @@ function pendingLabel(t: Ticket): string {
 }
 
 /**
- * 工单核心域服务：CRUD / 状态机 / DAG 校验 / 留言 / BLOCKER 升级。
+ * 工单核心域服务：CRUD / 状态机 / DAG 校验 / 留言（卡点内联为原单 BLOCKED 状态，无独立卡点单）。
  * 同步驱动铁则 1：事务回调内只写同步代码（better-sqlite3）。
  */
 export class TicketService {
@@ -317,21 +320,6 @@ export class TicketService {
       .orderBy(desc(ticketReports.round), desc(ticketReports.id))
       .limit(1)
       .get();
-    // 未关 BLOCKER：blockedBy 目标中类型为 BLOCKER 且未到终态的单（BLOCKED 存续期恰好一张）
-    const blockerRow = this.db
-      .select({ t: tickets })
-      .from(ticketDependencies)
-      .innerJoin(tickets, eq(ticketDependencies.blockedByTicketId, tickets.id))
-      .where(
-        and(
-          eq(ticketDependencies.ticketId, id),
-          eq(tickets.type, 'BLOCKER'),
-          inArray(tickets.status, ['DRAFT', 'SPEC_READY', 'DISPATCHED', 'IN_PROGRESS', 'BLOCKED']),
-        ),
-      )
-      .orderBy(asc(ticketDependencies.id))
-      .limit(1)
-      .get();
     return {
       ticket,
       children,
@@ -353,7 +341,6 @@ export class TicketService {
             blockReason: reportRow.blockReason,
           }
         : null,
-      blocker: blockerRow ? toTicket(blockerRow.t) : null,
     };
   }
 
@@ -457,10 +444,6 @@ export class TicketService {
       if (to === 'DONE' && row.type === 'STORY') {
         this.assertChildrenSettled(tx, id);
       }
-      // BLOCKED→DONE 仅限 BLOCKER 关单（resolve 路径）；TASK 的 BLOCKED 出路只有裁决三向+取消
-      if (row.status === 'BLOCKED' && to === 'DONE' && row.type !== 'BLOCKER') {
-        throw new AppError('INVALID_TRANSITION', `仅 BLOCKER 可从 BLOCKED 直接关单（当前类型 ${row.type}）`);
-      }
       // ②③④⑤ TASK 放行四件套（仅 user 通道）：workerId 必填 → ∈Registry → repoRef 复校 → worktree 可建
       // （重开场景：未指定新 workerId 时沿用原绑定；system 自动放行链不做 repoRef 复校——
       //  spawn 期解析失败走既有 preSpawnFail→CANCELLED 可重派语义，与人工通道分流）
@@ -489,8 +472,8 @@ export class TicketService {
         .set({
           status: to,
           updatedAt: now,
-          ...(to === 'BLOCKED' ? { pendingLabel: 'l3' } : {}),
-          ...(row.status === 'BLOCKED' && to !== 'BLOCKED' ? { pendingLabel: null } : {}),
+          ...(to === 'BLOCKED' ? { pendingLabel: 'l3', ...(o.blockReason != null ? { blockReason: o.blockReason } : {}) } : {}),
+          ...(row.status === 'BLOCKED' && to !== 'BLOCKED' ? { pendingLabel: null, blockReason: null } : {}),
           ...(o.workerId != null ? { workerId: o.workerId } : {}),
           ...(o.round !== undefined ? { round: o.round } : {}),
         })
@@ -523,62 +506,6 @@ export class TicketService {
         .returning()
         .get();
       return updated.round;
-    });
-  }
-
-  /**
-   * L3 升级：创建 BLOCKER 单（初始 IN_PROGRESS，绑定「人」）+ 首条留言（system，reason 全文）
-   * + blockedBy 依赖边（父单被 BLOCKER 阻塞）。不建 worktree、不绑 worker。
-   */
-  createBlocker(input: { parentTicketId: number; reason: string }): Ticket {
-    return this.db.transaction((tx) => {
-      const parent = tx.select().from(tickets).where(eq(tickets.id, input.parentTicketId)).get();
-      if (!parent) throw new AppError('NOT_FOUND', `父单 #${input.parentTicketId} 不存在`);
-      const now = Date.now();
-      const blocker = tx
-        .insert(tickets)
-        .values({
-          type: 'BLOCKER',
-          title: `卡点: ${parent.title}`,
-          description: null,
-          // 卡点单本质是「被父单的卡点阻塞、等人处理」——呈现 BLOCKED(pending:l3) 而非 IN_PROGRESS
-          status: 'BLOCKED',
-          parentId: null,
-          specContent: null,
-          workerId: null,
-          // workspaceId 继承收口在本单点（从父单行直读，dispatcher 不另写字段）；BLOCKER 无仓语义
-          workspaceId: parent.workspaceId,
-          repoRef: null,
-          pendingLabel: 'l3',
-          round: 0,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .returning()
-        .get();
-      tx.insert(ticketTransitions)
-        .values({
-          ticketId: blocker.id,
-          fromStatus: 'DRAFT',
-          toStatus: 'BLOCKED',
-          operator: 'system',
-          note: '卡点升级自动创建',
-          createdAt: now,
-        })
-        .run();
-      tx.insert(ticketDependencies)
-        .values({ ticketId: parent.id, blockedByTicketId: blocker.id, createdAt: now })
-        .run();
-      tx.insert(comments)
-        .values({
-          ticketId: blocker.id,
-          authorType: 'system',
-          authorName: 'atd',
-          content: input.reason,
-          createdAt: now,
-        })
-        .run();
-      return toTicket(blocker);
     });
   }
 

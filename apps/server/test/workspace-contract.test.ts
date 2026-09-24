@@ -145,16 +145,16 @@ describe('放行 repoRef 复校（user 通道）【S2w1 FR-4】', () => {
 });
 
 describe('BLOCKER workspaceId 继承【D7 单点收口】', () => {
-  test('createBlocker 从父单行继承 workspaceId，repoRef 恒 null', () => {
+  test('卡点内联后 BLOCKED 单保留原 workspaceId/repoRef（无独立卡点单）', () => {
     const { service } = createTestContext();
-    const t = service.createTicket({ type: 'TASK', title: '卡点父' });
+    const t = service.createTicket({ type: 'TASK', title: '卡点父', repoRef: 'atd' });
     service.submitSpec(t.id, '# spec');
     service.transition(t.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
     service.transition(t.id, 'IN_PROGRESS', { actor: 'system' });
-    service.transition(t.id, 'BLOCKED', { actor: 'system' });
-    const blocker = service.createBlocker({ parentTicketId: t.id, reason: '外部卡点' });
-    expect(blocker.workspaceId).toBe('atd');
-    expect(blocker.repoRef).toBeNull();
+    const blocked = service.transition(t.id, 'BLOCKED', { actor: 'system', blockReason: '外部卡点' });
+    expect(blocked.workspaceId).toBe('atd');
+    expect(blocked.repoRef).toBe('atd');
+    expect(blocked.blockReason).toBe('外部卡点');
   });
 });
 

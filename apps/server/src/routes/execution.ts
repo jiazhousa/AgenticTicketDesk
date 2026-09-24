@@ -112,14 +112,14 @@ export function registerExecutionRoutes(
     return { ok: true };
   });
 
-  // POST /api/tickets/:blockerId/resolve —— 卡点裁决（继续/改派/终止）
-  app.post('/api/tickets/:blockerId/resolve', async (req) => {
-    const { blockerId } = parse(blockerParams, req.params);
+  // POST /api/tickets/:id/resolve —— 卡点裁决（继续/改派/终止；卡点=原单 BLOCKED 状态）
+  app.post('/api/tickets/:id/resolve', async (req) => {
+    const { id } = parse(idParams, req.params);
     const body = parse(resolveBody, req.body);
     if (!runtime) {
       throw new AppError('RESOLUTION_INVALID', '编排运行时未配置，无法裁决');
     }
-    return runtime.dispatcher.resolveBlocker(blockerId, body);
+    return { ticket: runtime.dispatcher.resolveTicket(id, body) };
   });
 
   // POST /api/tickets/:id/reopen —— 终态重开（留言即本轮指令，原 worktree 续跑）

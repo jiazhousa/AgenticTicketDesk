@@ -27,6 +27,8 @@ export const tickets = sqliteTable('tickets', {
   repoRef: text('repo_ref'),
   /** BLOCKED 存续期的卡点等级（'l3'；后续版本扩 'agent'），转出 BLOCKED 时置 NULL */
   pendingLabel: text('pending_label'),
+  /** BLOCKED 存续期的卡点原因（内联卡点语义，无独立卡点单）；转出 BLOCKED 时置 NULL */
+  blockReason: text('block_reason'),
   /** 执行轮次（每次 spawn +1；首轮 1） */
   round: integer('round').notNull().default(0),
   /** 毫秒时间戳 */
