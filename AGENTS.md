@@ -24,7 +24,7 @@ workers/opencode.yaml # worker profile 声明（spawn-cli 协议）
 ### 工单类型
 - `STORY`：聚合容器，子单全落定（DONE/FAILED/CANCELLED）才可关单
 - `TASK`：唯一可放行执行的类型；spec 快照（specContent）派发时固化
-- `BLOCKER`：卡点单——worker 报告 blocked 时自动创建，**出生即 BLOCKED(pending:l3)**，等人裁决（继续/改派/终止）
+- 卡点（内联语义）：**无独立卡点单**——worker 报告 blocked 或报告缺失重试耗尽时，原单转 BLOCKED(pending:l3) 且 `blockReason` 字段内联卡点上下文（+system 留言全文）；裁决即原单操作 `POST /api/tickets/:id/resolve`（continue 原 worktree 续跑/reassign 换 worker/abort FAILED），转出 BLOCKED 自动清空 blockReason
 
 ### Workspace 多项目（apps/server/src/workspaces.ts）
 - workspace=项目群容器（声明式 yaml，ATD 即普通一员）；**worker×workspace×repoRef=Task 三元组**定位一次执行
