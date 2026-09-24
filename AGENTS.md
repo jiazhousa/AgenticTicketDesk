@@ -14,7 +14,8 @@ apps/server          # Fastify + Drizzle/better-sqlite3：工单域 + 编排（d
 apps/web             # React + Vite + antd：工作台/仪表盘/详情/日志页
 packages/worker-core # worker 注册协议（profile zod + 校验：token/凭据扫描/schema）
 packages/worker-opencode # opencode 适配（事件流解析/进程管理）
-config.yaml          # repoPath（默认自吃本仓）/dataDir（~/.local/share/atd）/超时
+config.yaml          # dataDir（~/.local/share/atd）/超时/重试（repoPath 已不参与装配）
+workspaces/atd.yaml  # workspace 声明式接入（ATD 自吃兼模板；目录缺失/非法声明=启动失败）
 workers/opencode.yaml # worker profile 声明（spawn-cli 协议）
 ```
 
@@ -23,7 +24,13 @@ workers/opencode.yaml # worker profile 声明（spawn-cli 协议）
 ### 工单类型
 - `STORY`：聚合容器，子单全落定（DONE/FAILED/CANCELLED）才可关单
 - `TASK`：唯一可放行执行的类型；spec 快照（specContent）派发时固化
-- `BLOCKER`：卡点单——worker 报告 blocked 时自动创建，**出生即 BLOCKED(pending:l3)**，等人裁决（继续/改派/终止）
+- 卡点（内联语义）：**无独立卡点单**——worker 报告 blocked 或报告缺失重试耗尽时，原单转 BLOCKED(pending:l3) 且 `blockReason` 字段内联卡点上下文（+system 留言全文）；裁决即原单操作 `POST /api/tickets/:id/resolve`（continue 原 worktree 续跑/reassign 换 worker/abort FAILED），转出 BLOCKED 自动清空 blockReason
+
+### Workspace 多项目（apps/server/src/workspaces.ts）
+- workspace=项目群容器（声明式 yaml，ATD 即普通一员）；**worker×workspace×repoRef=Task 三元组**定位一次执行
+- repos：role=primary（主仓，建单缺省目标）| readable（可指定目标）；repoRef 建单后**不可变**（重开/改派沿用）
+- 建单缺省 workspaceId=atd、repoRef=主仓（落库实际值）；父子/依赖边限同 workspace（CROSS_WORKSPACE 拒绝）
+- 四错误码：WORKSPACE_UNKNOWN / REPO_REF_INVALID / REPO_REF_DRIFTED / CROSS_WORKSPACE
 
 ### 状态机（apps/server/src/domain/status.ts）
 ```
@@ -34,7 +41,7 @@ BLOCKED → IN_PROGRESS | DISPATCHED | FAILED | CANCELLED | DONE(仅 BLOCKER 型
 DRAFT/SPEC_READY/DISPATCHED/BLOCKED → CANCELLED（user 边）
 ```
 - 边表 `TRANSITIONS` + `isUserEdge`（type 分流）双定义，改动必须同步两侧
-- TASK 放行三件套前置：workerId 必填（重开未指定则沿用原绑定）→ ∈Registry → worktree 可建
+- TASK 放行四件套前置：workerId 必填（重开未指定则沿用原绑定）→ ∈Registry → worktree 可建 → repoRef 复校（user 通道漂移 422 REPO_REF_DRIFTED；system 自动放行链不复校，spawn 解析失败走 preSpawnFail→CANCELLED）
 - 建单支持 `workerId` 预绑定（编排链拆单语义，自动放行前提；校验 ∈Registry）
 
 ### 依赖与编排链自动流转
@@ -43,7 +50,8 @@ DRAFT/SPEC_READY/DISPATCHED/BLOCKED → CANCELLED（user 边）
 - L2 重试：报告缺失/schema 错重试 1 次（round+1）；崩溃/超时直接 FAILED 不重试
 
 ### Worker spawn（packages/worker-opencode + apps/server/src/dispatcher.ts）
-- worktree：`{dataDir}/worktrees/{repoName}-t{id}`、分支 `atd/t{id}`（已知限制：多实例单号会撞分支名）
+- worktree：`{dataDir}/worktrees/{目标仓basename}-t{id}`（按工单 workspace+repoRef 解析仓）、分支 `atd/t{id}`（已知限制：多实例单号会撞分支名）
+- 解单 cwd=目标仓 worktree，**目标仓自身的 AGENTS.md 随 checkout 被 opencode 天然加载**（跨仓 Story 的 Task 链各仓独立取知识）；API：`GET /api/workspaces(/:id)`、列表 `?workspaceId=`、建单 `workspaceId/repoRef`
 - prompt 落 `{dataDir}/prompts/t{id}.r{round}.md`；round>1 注入轮次上下文（前轮报告 + 用户留言）
 - 统一日志 `{dataDir}/logs/t{id}.r{round}.*.jsonl`；worker 产出 `atd-report.json`（done/blocked + summary + commits）
 - commits 以 git 实测为准（基线 diff），报告值仅交叉校验

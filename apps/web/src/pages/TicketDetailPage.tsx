@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Card, Descriptions, Space, Spin, Typography } from 'antd';
+import { Alert, Button, Card, Descriptions, Space, Spin, Tag, Typography } from 'antd';
 import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { getTicket } from '../api/tickets';
 import type { TicketDetail } from '../api/types';
 import StatusTag, { TypeTag } from '../components/StatusTag';
+import { resolveRepoRefLabel } from '../components/RepoRefTag';
 import TransitionActions from '../components/TransitionActions';
 import SpecCard from '../components/SpecCard';
 import DependencyPanel from '../components/DependencyPanel';
@@ -13,13 +14,14 @@ import Timeline from '../components/Timeline';
 import ExecutionCard from '../components/ExecutionCard';
 import StorySwimlane from '../components/StorySwimlane';
 import ReportCard from '../components/ReportCard';
-import BlockerCard from '../components/BlockerCard';
+import BlockedResolutionCard from '../components/BlockedResolutionCard';
 import { formatTime } from '../utils/format';
+import { useWorkspaceMap } from '../utils/workspace';
 
 /**
  * 工单详情页（验收反馈后瘦身）：执行卡只留 状态/worker/轮次/时长 + 日志入口——
  * worker 原始事件流不在详情页展示（独立日志页）。卡布局：
- * ①基本信息+状态操作 ②执行卡（瘦身后）③完成报告（DONE）④卡点处理（BLOCKED/BLOCKER）
+ * ①基本信息+状态操作 ②执行卡（瘦身后）③完成报告（DONE）④卡点裁决（BLOCKED——卡点内联于本单状态）
  * ⑤Story 泳道链（STORY 核心区块：子单依赖 DAG）⑥spec 快照 ⑦依赖与父子 ⑧留言+时间线。
  * hasCancelledChildren=true 时顶部 Alert 提示（A7 锚点：CANCELLED 子单不阻塞父单关单，需人工裁决）。
  */
@@ -27,6 +29,8 @@ export default function TicketDetailPage() {
   const params = useParams<{ id: string }>();
   const navigate = useNavigate();
   const ticketId = Number(params.id);
+  // workspace 索引（本单所属 workspace 的主仓判定/名称展示；yaml 静态声明，模块级缓存直查）
+  const workspaceMap = useWorkspaceMap();
   const [detail, setDetail] = useState<TicketDetail | null>(null);
   const [loading, setLoading] = useState(false);
   // 加载失败且无缓存数据时显示空态（有缓存时保留旧数据，错误已 toast）
@@ -77,7 +81,7 @@ export default function TicketDetailPage() {
     );
   }
 
-  const { ticket, blocks } = detail;
+  const { ticket } = detail;
 
   return (
     <div style={{ padding: 24 }}>
@@ -111,6 +115,22 @@ export default function TicketDetailPage() {
             <Descriptions.Item label="单号">#{ticket.id}</Descriptions.Item>
             <Descriptions.Item label="类型"><TypeTag type={ticket.type} /></Descriptions.Item>
             <Descriptions.Item label="状态"><StatusTag status={ticket.status} /></Descriptions.Item>
+            <Descriptions.Item label="工作空间">
+              {(() => {
+                const ws = workspaceMap?.get(ticket.workspaceId);
+                return ws != null ? `${ws.name}（${ws.id}）` : ticket.workspaceId;
+              })()}
+            </Descriptions.Item>
+            {ticket.type === 'TASK' && ticket.repoRef != null && (
+              // 目标仓：非主仓 geekblue Tag 醒目；主仓普通文本（建单后不可变）
+              <Descriptions.Item label="目标仓">
+                {resolveRepoRefLabel(ticket, workspaceMap) != null ? (
+                  <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>{ticket.repoRef}</Tag>
+                ) : (
+                  <Typography.Text>{ticket.repoRef}（主仓）</Typography.Text>
+                )}
+              </Descriptions.Item>
+            )}
             <Descriptions.Item label="创建时间">{formatTime(ticket.createdAt)}</Descriptions.Item>
             <Descriptions.Item label="更新时间">{formatTime(ticket.updatedAt)}</Descriptions.Item>
             <Descriptions.Item label="worker">
@@ -147,27 +167,9 @@ export default function TicketDetailPage() {
           <ReportCard report={detail.report} commits={detail.commits} />
         )}
 
-        {/* 卡4：卡点处理——父单视角（BLOCKED 态关联未关 BLOCKER） */}
-        {ticket.status === 'BLOCKED' &&
-          (detail.blocker != null ? (
-            <BlockerCard
-              blocker={detail.blocker}
-              blockReason={detail.report?.blockReason ?? null}
-              onChanged={() => reload()}
-            />
-          ) : (
-            // 编排层保证 BLOCKED 存续期间恰好关联一张未关 BLOCKER；缺失属数据异常
-            <Alert
-              type="error"
-              showIcon
-              message="数据异常：阻塞态未关联卡点单"
-              description="该工单处于阻塞状态但没有对应的未关卡点单，请检查数据一致性。"
-            />
-          ))}
-
-        {/* 卡4：卡点处理——BLOCKER 单自身视角（resolve 入口；卡点单呈现 BLOCKED(pending:l3)） */}
-        {ticket.type === 'BLOCKER' && ticket.status === 'BLOCKED' && (
-          <BlockerCard blocker={ticket} parentTicketId={blocks[0]?.id} onChanged={() => reload()} />
+        {/* 卡4：卡点裁决（BLOCKED 态内联：卡点=本单状态，blockReason 全文展示，直接裁决转出） */}
+        {ticket.status === 'BLOCKED' && (
+          <BlockedResolutionCard ticket={ticket} onChanged={() => reload()} />
         )}
 
         {/* 卡5：Story 泳道链（STORY 核心区块：子单依赖分层 DAG，并行同列、串行向下） */}

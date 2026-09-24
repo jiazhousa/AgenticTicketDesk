@@ -7,7 +7,7 @@
  * 时间戳字段均为毫秒数（DB 层 INTEGER ms，Drizzle 映射为 API 层 camelCase）。
  */
 
-/** 工单类型（§1：S1 实际仅使用 STORY / TASK；BLOCKER/DREAM 为枚举全集占位） */
+/** 工单类型（§1：实际仅使用 STORY / TASK；BLOCKER 类型已废除——卡点=原单 BLOCKED 状态，枚举位保留与 server 契约镜像；DREAM 为全集占位） */
 export type TicketType = 'STORY' | 'TASK' | 'BLOCKER' | 'DREAM';
 
 /** 工单状态（S2a 八态：六态之上扩展 BLOCKED(pending:l3)/FAILED，转移边见 server 状态机） */
@@ -21,7 +21,40 @@ export type TicketStatus =
   | 'CANCELLED'
   | 'FAILED';
 
-/** 工单实体（§3 契约底部定义；S2a 增 round 执行轮次/pendingLabel 卡点层级） */
+/**
+ * workspace 内的仓声明（workspaces/*.yaml 声明式接入，只读——改 yaml 重启生效）。
+ * role=primary 主仓（每 workspace 恰一个：工单缺省目标）；readable 可读仓（TASK 可指定为目标）。
+ */
+export interface WorkspaceRepo {
+  id: string;
+  /** 解析后绝对路径（声明相对仓根或 `~` 展开） */
+  path: string;
+  role: 'primary' | 'readable';
+}
+
+/** Workspace（项目群容器）：GET /api/workspaces 列表项（含主仓标识与工单计数） */
+export interface Workspace {
+  id: string;
+  /** 显示名 */
+  name: string;
+  repos: WorkspaceRepo[];
+  /** 主仓 repo id（冗余便于前端） */
+  primary: string;
+  /** 该 workspace 工单计数 */
+  ticketCount: number;
+}
+
+/** GET /api/workspaces 响应（workspaces 数组包裹） */
+export interface WorkspacesResponse {
+  workspaces: Workspace[];
+}
+
+/** GET /api/workspaces/:id 响应（单资源 `{ workspace }` 包裹；未知 id → 404） */
+export interface WorkspaceDetailResponse {
+  workspace: Workspace;
+}
+
+/** 工单实体（§3 契约底部定义；S2a 增 round 执行轮次/pendingLabel 卡点层级；S2w1 增 workspace 挂载） */
 export interface Ticket {
   id: number;
   type: TicketType;
@@ -31,10 +64,16 @@ export interface Ticket {
   parentId: number | null;
   specContent: string | null;
   workerId: string | null;
+  /** 所属 workspace id（恒有；存量单由 migration DEFAULT 归属 atd） */
+  workspaceId: string;
+  /** 目标仓 id（仅 TASK 非 null；缺省=所属 workspace 主仓，落库为实际值） */
+  repoRef: string | null;
   /** 执行轮次（spawn 起算，首轮 1；未执行为 0） */
   round: number;
   /** 卡点层级标签（'l3'，仅 BLOCKED 态非空；S3 扩 'agent'） */
   pendingLabel: string | null;
+  /** 卡点原因全文（内联卡点语义：仅 BLOCKED 态非空，转出自动清空；用户裁决依据） */
+  blockReason: string | null;
   /** 毫秒时间戳 */
   createdAt: number;
   /** 毫秒时间戳 */
@@ -70,7 +109,7 @@ export interface TicketTransition {
   createdAt: number;
 }
 
-/** 详情响应（§3.3；S2a 增量：执行/报告/commit 关联/卡点单） */
+/** 详情响应（§3.3；S2a 增量：执行/报告/commit 关联；卡点内联于 ticket.blockReason，无独立聚合） */
 export interface TicketDetail {
   ticket: Ticket;
   /** 子单列表 */
@@ -92,8 +131,6 @@ export interface TicketDetail {
   commits: TicketCommit[];
   /** 最大轮完成报告（从未产出报告为 null） */
   report: TicketReport | null;
-  /** 未关 BLOCKER 单（BLOCKED 存续期间恰好关联一张；其余态为 null） */
-  blocker: Ticket | null;
 }
 
 /** 当前轮执行信息 */
@@ -163,17 +200,22 @@ export interface LogsResponse {
   events: UnifiedEvent[];
 }
 
-/** 卡点裁决请求（POST /api/tickets/:blockerId/resolve） */
-export interface ResolveBlockerRequest {
-  /** continue=继续（原 worktree 换轮重跑）/ reassign=改派（复用 worktree 换 worker）/ abort=终止（父单 FAILED） */
+/** 卡点裁决请求（POST /api/tickets/:id/resolve，id=阻塞原单——卡点内联于原单，无独立卡点单） */
+export interface ResolveTicketRequest {
+  /** continue=继续（原 worktree 换轮重跑）/ reassign=改派（复用 worktree 换 worker）/ abort=终止（原单 FAILED） */
   resolution: 'continue' | 'reassign' | 'abort';
-  /** 裁决留言（落 BLOCKER 单） */
+  /** 裁决留言（落原单留言时间线） */
   note?: string;
-  /** resolution=reassign 时必填：新 worker id */
+  /** resolution=reassign 时必填：新 worker id（缺失 422 WORKER_REQUIRED / 未注册 422 WORKER_UNKNOWN） */
   reassignWorkerId?: string;
 }
 
-/** 建单请求（§3.1；BLOCKER/DREAM 暂不接受创建） */
+/** 卡点裁决响应：转出后的原单（continue/reassign → IN_PROGRESS/DISPATCHED；abort → FAILED） */
+export interface ResolveTicketResponse {
+  ticket: Ticket;
+}
+
+/** 建单请求（§3.1；DREAM 暂不接受创建，BLOCKER 类型已废除；S2w1 增 workspace 挂载可选参数） */
 export interface CreateTicketRequest {
   type: 'STORY' | 'TASK';
   title: string;
@@ -181,6 +223,10 @@ export interface CreateTicketRequest {
   parentId?: number;
   /** 预绑定 worker（仅 TASK；编排链拆单场景——依赖满足后自动放行的前提） */
   workerId?: string;
+  /** 所属 workspace（可选；缺省 atd，未知 id → 422 WORKSPACE_UNKNOWN；带 parentId 时强制继承父单） */
+  workspaceId?: string;
+  /** 目标仓 id（仅 TASK 可选；必须 ∈ 所属 workspace 的 repos id，缺省=主仓，非法值 → 422 REPO_REF_INVALID） */
+  repoRef?: string;
 }
 
 /** 终态重开请求（POST /api/tickets/:id/reopen）：留言即本轮指令，原 worktree 续跑 */

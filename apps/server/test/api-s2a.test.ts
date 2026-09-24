@@ -30,15 +30,14 @@ function makeExecutedTicket(ctx: TestContext): number {
   return t.id;
 }
 
-/** 构造 BLOCKED 单 + 未关 BLOCKER */
-function makeBlockedTicket(ctx: TestContext, title: string): { parent: number; blocker: number } {
+/** 构造 BLOCKED 单（内联卡点：blockReason 落原单） */
+function makeBlockedTicket(ctx: TestContext, title: string): { parent: number } {
   const t = ctx.service.createTicket({ type: 'TASK', title });
   ctx.service.submitSpec(t.id, '# spec');
   ctx.service.transition(t.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
   ctx.service.transition(t.id, 'IN_PROGRESS', { actor: 'system' });
-  ctx.service.transition(t.id, 'BLOCKED', { actor: 'system' });
-  const blocker = ctx.service.createBlocker({ parentTicketId: t.id, reason: '外部卡点：需人工确认' });
-  return { parent: t.id, blocker: blocker.id };
+  ctx.service.transition(t.id, 'BLOCKED', { actor: 'system', blockReason: '外部卡点：需人工确认' });
+  return { parent: t.id };
 }
 
 describe('GET /api/workers', () => {
@@ -95,7 +94,7 @@ describe('POST /transition 放行校验链', () => {
 });
 
 describe('GET /api/tickets/:id 详情聚合扩展', () => {
-  test('含 round/pendingLabel/workerName/execution/commits/report；无卡点时 blocker=null', async () => {
+  test('含 round/pendingLabel/workerName/execution/commits/report/blockReason', async () => {
     const ctx = createTestContext();
     const id = makeExecutedTicket(ctx);
     const res = await ctx.app.inject({ method: 'GET', url: `/api/tickets/${id}` });
@@ -109,10 +108,10 @@ describe('GET /api/tickets/:id 详情聚合扩展', () => {
     expect(body.execution).toBeNull();
     expect(body.commits).toEqual([{ round: 1, sha: 'deadbeefdeadbeef' }]);
     expect(body.report).toEqual({ round: 1, status: 'done', summary: '测试摘要', blockReason: null });
-    expect(body.blocker).toBeNull();
+    expect(body.ticket.blockReason).toBeNull();
   });
 
-  test('执行中（IN_PROGRESS）携带 execution；BLOCKER 详情 blocks 反查父单', async () => {
+  test('执行中（IN_PROGRESS）携带 execution', async () => {
     const ctx = createTestContext();
     const t = ctx.service.createTicket({ type: 'TASK', title: '执行中单' });
     ctx.service.submitSpec(t.id, '# spec');
@@ -121,29 +120,16 @@ describe('GET /api/tickets/:id 详情聚合扩展', () => {
     const res = await ctx.app.inject({ method: 'GET', url: `/api/tickets/${t.id}` });
     expect(res.json().execution?.startedAt).toEqual(expect.any(Number));
 
-    // BLOCKER：造父单 BLOCKED + BLOCKER 子单 → BLOCKER 详情 blocks 含父单
-    const parent = ctx.service.createTicket({ type: 'TASK', title: '卡点父单' });
-    ctx.service.submitSpec(parent.id, '# spec');
-    ctx.service.transition(parent.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
-    ctx.service.transition(parent.id, 'IN_PROGRESS', { actor: 'system', round: 1 });
-    ctx.service.transition(parent.id, 'BLOCKED', { actor: 'system', note: '升级' });
-    const blocker = ctx.service.createBlocker({ parentTicketId: parent.id, reason: '上下文' });
-    const bRes = await ctx.app.inject({ method: 'GET', url: `/api/tickets/${blocker.id}` });
-    expect(bRes.json().blocks.map((x: { id: number }) => x.id)).toContain(parent.id);
   });
 
-  test('BLOCKED 单透出 pendingLabel=l3 与未关 BLOCKER', async () => {
+  test('BLOCKED 单透出 pendingLabel=l3 与内联 blockReason', async () => {
     const ctx = createTestContext();
-    const { parent, blocker } = makeBlockedTicket(ctx, '卡住的任务');
+    const { parent } = makeBlockedTicket(ctx, '卡住的任务');
     const res = await ctx.app.inject({ method: 'GET', url: `/api/tickets/${parent}` });
     const body = res.json();
     expect(body.ticket.status).toBe('BLOCKED');
     expect(body.ticket.pendingLabel).toBe('l3');
-    expect(body.blocker).toMatchObject({ id: blocker, type: 'BLOCKER', status: 'BLOCKED', pendingLabel: 'l3' });
-    // BLOCKER 关闭后详情不再透出
-    ctx.service.transition(blocker, 'DONE', { actor: 'system' });
-    const after = (await ctx.app.inject({ method: 'GET', url: `/api/tickets/${parent}` })).json();
-    expect(after.blocker).toBeNull();
+    expect(body.ticket.blockReason).toBe('外部卡点：需人工确认');
   });
 });
 
@@ -185,8 +171,8 @@ describe('GET /api/tickets/:id/logs', () => {
   });
 });
 
-describe('POST /api/tickets/:blockerId/resolve 校验链', () => {
-  test('目标不是 BLOCKER → RESOLUTION_INVALID', async () => {
+describe('POST /api/tickets/:id/resolve 校验链（内联卡点）', () => {
+  test('终态单不可裁决 → RESOLUTION_INVALID', async () => {
     const ctx = createTestContext();
     const id = makeExecutedTicket(ctx);
     const res = await ctx.app.inject({
@@ -198,30 +184,29 @@ describe('POST /api/tickets/:blockerId/resolve 校验链', () => {
     expect(res.json().error.code).toBe('RESOLUTION_INVALID');
   });
 
-  test('BLOCKER 已关 → RESOLUTION_INVALID', async () => {
+  test('转出 BLOCKED 后再裁决 → RESOLUTION_INVALID（含 blockReason 已清空断言）', async () => {
     const ctx = createTestContext();
-    const { blocker } = makeBlockedTicket(ctx, '已决任务');
-    ctx.service.transition(blocker, 'DONE', { actor: 'system' });
+    const { parent } = makeBlockedTicket(ctx, '已决任务');
+    ctx.service.transition(parent, 'FAILED', { actor: 'system' });
+    expect(ctx.service.getTicket(parent).blockReason).toBeNull();
     const res = await ctx.app.inject({
       method: 'POST',
-      url: `/api/tickets/${blocker}/resolve`,
+      url: `/api/tickets/${parent}/resolve`,
       payload: { resolution: 'abort' },
     });
     expect(res.statusCode).toBe(422);
     expect(res.json().error.code).toBe('RESOLUTION_INVALID');
   });
 
-  test('父单非 BLOCKED → RESOLUTION_INVALID', async () => {
+  test('IN_PROGRESS 单不可裁决 → RESOLUTION_INVALID', async () => {
     const ctx = createTestContext();
-    const t = ctx.service.createTicket({ type: 'TASK', title: '未阻塞父单' });
+    const t = ctx.service.createTicket({ type: 'TASK', title: '未阻塞单' });
     ctx.service.submitSpec(t.id, '# spec');
     ctx.service.transition(t.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
     ctx.service.transition(t.id, 'IN_PROGRESS', { actor: 'system' });
-    // 直接建 BLOCKER 但父单保持 IN_PROGRESS
-    const blocker = ctx.service.createBlocker({ parentTicketId: t.id, reason: 'x' });
     const res = await ctx.app.inject({
       method: 'POST',
-      url: `/api/tickets/${blocker.id}/resolve`,
+      url: `/api/tickets/${t.id}/resolve`,
       payload: { resolution: 'abort' },
     });
     expect(res.statusCode).toBe(422);
@@ -230,10 +215,10 @@ describe('POST /api/tickets/:blockerId/resolve 校验链', () => {
 
   test('reassign 缺 reassignWorkerId → 422；未注册 → WORKER_UNKNOWN', async () => {
     const ctx = createTestContext();
-    const { blocker } = makeBlockedTicket(ctx, '改派任务');
+    const { parent } = makeBlockedTicket(ctx, '改派任务');
     const miss = await ctx.app.inject({
       method: 'POST',
-      url: `/api/tickets/${blocker}/resolve`,
+      url: `/api/tickets/${parent}/resolve`,
       payload: { resolution: 'reassign' },
     });
     expect(miss.statusCode).toBe(422);
@@ -241,28 +226,28 @@ describe('POST /api/tickets/:blockerId/resolve 校验链', () => {
 
     const ghost = await ctx.app.inject({
       method: 'POST',
-      url: `/api/tickets/${blocker}/resolve`,
+      url: `/api/tickets/${parent}/resolve`,
       payload: { resolution: 'reassign', reassignWorkerId: 'ghost' },
     });
     expect(ghost.statusCode).toBe(422);
     expect(ghost.json().error.code).toBe('WORKER_UNKNOWN');
   });
 
-  test('abort 裁决：note 落 BLOCKER 留言 → BLOCKER DONE → 父单 FAILED', async () => {
+  test('abort 裁决：note 落原单留言 → FAILED 且卡点字段清空', async () => {
     const ctx = createTestContext();
-    const { parent, blocker } = makeBlockedTicket(ctx, '终止任务');
+    const { parent } = makeBlockedTicket(ctx, '终止任务');
     const res = await ctx.app.inject({
       method: 'POST',
-      url: `/api/tickets/${blocker}/resolve`,
+      url: `/api/tickets/${parent}/resolve`,
       payload: { resolution: 'abort', note: '放弃该方案' },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(body.blocker.status).toBe('DONE');
-    expect(body.parent.status).toBe('FAILED');
-    const comments = ctx.service.getTicketDetail(blocker).comments;
+    expect(body.ticket.status).toBe('FAILED');
+    const comments = ctx.service.getTicketDetail(parent).comments;
     expect(comments.at(-1)).toMatchObject({ authorType: 'user', content: '放弃该方案' });
     expect(ctx.service.getTicket(parent).pendingLabel).toBeNull();
+    expect(ctx.service.getTicket(parent).blockReason).toBeNull();
   });
 });
 

@@ -13,7 +13,7 @@ const STATUS_META: Record<TicketStatus, { label: string; color?: string }> = {
   FAILED: { label: '失败', color: 'volcano' },
 };
 
-/** 类型文案（S1 实际仅使用 STORY / TASK，BLOCKER/DREAM 为全集占位） */
+/** 类型文案（实际仅使用 STORY / TASK；BLOCKER 类型已废除——卡点=原单 BLOCKED 状态，label 仅作枚举全集防御占位；DREAM 为全集占位） */
 const TYPE_LABEL: Record<TicketType, string> = {
   STORY: '故事',
   TASK: '任务',
@@ -42,8 +42,8 @@ export default function StatusTag({ status }: { status: TicketStatus }) {
   return <Tag color={meta.color}>{meta.label}</Tag>;
 }
 
-/** 类型标签：STORY 紫 / TASK 蓝 / BLOCKER 红（S2a 卡点单），其余灰 */
+/** 类型标签：STORY 紫 / TASK 蓝，其余（DREAM 占位）灰 */
 export function TypeTag({ type }: { type: TicketType }) {
-  const color = type === 'STORY' ? 'purple' : type === 'TASK' ? 'blue' : type === 'BLOCKER' ? 'red' : 'default';
+  const color = type === 'STORY' ? 'purple' : type === 'TASK' ? 'blue' : 'default';
   return <Tag color={color}>{TYPE_LABEL[type]}</Tag>;
 }

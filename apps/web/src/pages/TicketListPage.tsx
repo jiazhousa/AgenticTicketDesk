@@ -1,26 +1,32 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Card, Select, Space, Table, Typography } from 'antd';
+import { Button, Card, Select, Space, Table, Tag, Typography } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { Link, useNavigate } from 'react-router-dom';
 import { listTickets } from '../api/tickets';
 import type { TicketListItem, TicketStatus, TicketType } from '../api/types';
 import StatusTag, { TypeTag, statusLabel, typeLabel } from '../components/StatusTag';
 import CreateTicketModal from '../components/CreateTicketModal';
+import { resolveRepoRefLabel } from '../components/RepoRefTag';
 import { formatTime } from '../utils/format';
+import { useWorkspace } from '../context/WorkspaceContext';
+import { useWorkspaceMap } from '../utils/workspace';
 
 /** 状态筛选项（S2a 八态全量） */
 const STATUS_OPTIONS: { value: TicketStatus; label: string }[] = (
   ['DRAFT', 'SPEC_READY', 'DISPATCHED', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'CANCELLED', 'FAILED'] as TicketStatus[]
 ).map((s) => ({ value: s, label: statusLabel(s) }));
 
-/** 类型筛选项：建单全集 + BLOCKER（卡点队列入口，spec §5） */
+/** 类型筛选项：建单全集（BLOCKER 类型已废除——卡点=原单 BLOCKED 状态，不再是工单类型） */
 const TYPE_OPTIONS: { value: TicketType; label: string }[] = (
-  ['STORY', 'TASK', 'BLOCKER'] as TicketType[]
+  ['STORY', 'TASK'] as TicketType[]
 ).map((t) => ({ value: t, label: typeLabel(t) }));
 
-/** 全量列表页（兜底视图）：日常入口在工作台/仪表盘，本页保留完整表格与筛选 */
+/** 全量列表页（兜底视图）：日常入口在工作台/仪表盘，本页保留完整表格与筛选；workspace 维度过滤统一收口顶栏切换器 */
 export default function TicketListPage() {
   const navigate = useNavigate();
+  // 顶栏切换器所选 workspace（null=全部）；切换即触发下方 load 重建重拉
+  const { workspaceId } = useWorkspace();
+  const workspaceMap = useWorkspaceMap();
   const [items, setItems] = useState<TicketListItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState<TicketStatus | undefined>();
@@ -30,14 +36,14 @@ export default function TicketListPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await listTickets({ status: statusFilter, type: typeFilter });
+      const res = await listTickets({ status: statusFilter, type: typeFilter, workspaceId: workspaceId ?? undefined });
       setItems(res.items);
     } catch {
       // 错误已由 api 层统一 toast
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, typeFilter]);
+  }, [statusFilter, typeFilter, workspaceId]);
 
   useEffect(() => {
     void load();
@@ -100,7 +106,38 @@ export default function TicketListPage() {
               render: (_, record) => <Link to={`/tickets/${record.id}`}>{record.title}</Link>,
             },
             { title: '类型', dataIndex: 'type', width: 90, render: (type: TicketType) => <TypeTag type={type} /> },
-            { title: '状态', dataIndex: 'status', width: 110, render: (status: TicketStatus) => <StatusTag status={status} /> },
+            {
+              // 目标仓：非主仓 TASK 显示仓名 Tag（主仓省略、非 TASK 无仓语义 → '—'）
+              title: '目标仓',
+              dataIndex: 'repoRef',
+              width: 100,
+              render: (_, record) => {
+                const label = resolveRepoRefLabel(record, workspaceMap);
+                return label != null ? (
+                  <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>
+                    {label}
+                  </Tag>
+                ) : (
+                  <Typography.Text type="secondary">—</Typography.Text>
+                );
+              },
+            },
+            {
+              title: '状态',
+              dataIndex: 'status',
+              width: 150,
+              render: (_, record) => (
+                <Space size={4}>
+                  <StatusTag status={record.status} />
+                  {/* BLOCKED=卡点内联待裁决，红标提醒（裁决入口在工作台/详情页） */}
+                  {record.status === 'BLOCKED' && (
+                    <Tag color="red" style={{ marginInlineEnd: 0 }}>
+                      待裁决
+                    </Tag>
+                  )}
+                </Space>
+              ),
+            },
             {
               title: '父单',
               width: 200,

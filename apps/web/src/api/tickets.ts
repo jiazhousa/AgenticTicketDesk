@@ -9,7 +9,8 @@ import type {
   CreateTicketRequest,
   LogsResponse,
   ReopenRequest,
-  ResolveBlockerRequest,
+  ResolveTicketRequest,
+  ResolveTicketResponse,
   Ticket,
   TicketComment,
   TicketDetail,
@@ -18,6 +19,9 @@ import type {
   TicketType,
   UpdateTicketRequest,
   WorkerInfo,
+  Workspace,
+  WorkspaceDetailResponse,
+  WorkspacesResponse,
 } from './types';
 
 /** 携带契约错误码的请求异常（code 见 impl §2.4 错误码全集） */
@@ -91,13 +95,14 @@ export function reopenTicket(id: number, req: ReopenRequest): Promise<Ticket> {
   });
 }
 
-/** §3.2 GET /api/tickets?status=&type= —— 列表（默认 createdAt DESC），含父子摘要 */
+/** §3.2 GET /api/tickets?status=&type=&workspaceId= —— 列表（默认 createdAt DESC），含父子摘要；workspaceId 不传=全量 */
 export async function listTickets(
-  params: { status?: TicketStatus; type?: TicketType } = {},
+  params: { status?: TicketStatus; type?: TicketType; workspaceId?: string } = {},
 ): Promise<{ items: TicketListItem[] }> {
   const qs = new URLSearchParams();
   if (params.status) qs.set('status', params.status);
   if (params.type) qs.set('type', params.type);
+  if (params.workspaceId) qs.set('workspaceId', params.workspaceId);
   const suffix = qs.toString() !== '' ? `?${qs.toString()}` : '';
   return request<{ items: TicketListItem[] }>(`/api/tickets${suffix}`);
 }
@@ -165,6 +170,21 @@ export function getWorkers(): Promise<WorkerInfo[]> {
 }
 
 /**
+ * GET /api/workspaces —— workspace 列表（含 repos 明细/主仓标识/工单计数）。
+ * 响应体 `{ workspaces: [...] }` 在此解包，调用方直接拿数组。
+ */
+export async function listWorkspaces(): Promise<Workspace[]> {
+  const res = await request<WorkspacesResponse>('/api/workspaces');
+  return res.workspaces;
+}
+
+/** GET /api/workspaces/:id —— workspace 详情（未知 id → 404）；响应体 `{ workspace }` 在此解包 */
+export async function getWorkspace(id: string): Promise<Workspace> {
+  const res = await request<WorkspaceDetailResponse>(`/api/workspaces/${encodeURIComponent(id)}`);
+  return res.workspace;
+}
+
+/**
  * GET /api/tickets/:id/logs?round=&tail= —— 执行日志尾部（统一事件流）。
  * 轮询高频场景：静默失败（不弹全局 toast），错误由 WorkerCard 行内展示。
  */
@@ -180,11 +200,12 @@ export function getLogs(
 }
 
 /**
- * POST /api/tickets/:blockerId/resolve —— 卡点裁决关单（BLOCKER→DONE + 按裁决转父单）。
- * 返回体不消费（成功后调用方重载详情）。
+ * POST /api/tickets/:id/resolve —— 卡点裁决（id=阻塞原单；卡点内联语义，无独立卡点单）。
+ * continue=原 worktree 续跑 / reassign=换 worker 续跑 / abort=原单 FAILED。
+ * 返回转出后的原单；非 BLOCKED 态 422 RESOLUTION_INVALID。
  */
-export function resolveBlocker(blockerId: number, req: ResolveBlockerRequest): Promise<void> {
-  return request<void>(`/api/tickets/${blockerId}/resolve`, {
+export function resolveTicket(id: number, req: ResolveTicketRequest): Promise<ResolveTicketResponse> {
+  return request<ResolveTicketResponse>(`/api/tickets/${id}/resolve`, {
     method: 'POST',
     body: JSON.stringify(req),
   });

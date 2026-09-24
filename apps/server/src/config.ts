@@ -8,8 +8,12 @@ import { z } from 'zod';
 export const DATA_SUBDIRS = ['worktrees', 'logs', 'prompts', 'runtime'] as const;
 
 const configSchema = z.object({
-  /** 目标仓路径（相对路径以 config.yaml 所在 repo 根为基准） */
-  repoPath: z.string().min(1),
+  /**
+   * 目标仓路径（相对路径以 config.yaml 所在 repo 根为基准）。
+   * S2w1 起不再参与装配——主仓声明唯一来源=workspaces/*.yaml（atd.yaml）；
+   * 字段保留 optional 兼容既有 config.yaml，读取方为零。
+   */
+  repoPath: z.string().min(1).optional(),
   /** S2a 产物根目录（~ 展开），默认 ~/.local/share/atd */
   dataDir: z.string().min(1).default('~/.local/share/atd'),
   /** 默认单轮执行超时（分钟）；profile 自带 timeoutMin 时以 profile 为准 */
@@ -50,7 +54,7 @@ export function loadConfig(repoRoot: string): AppConfig {
   const cfg = parsed.data;
   const resolved: AppConfig = {
     ...cfg,
-    repoPath: path.resolve(repoRoot, expandHome(cfg.repoPath)),
+    repoPath: cfg.repoPath != null ? path.resolve(repoRoot, expandHome(cfg.repoPath)) : undefined,
     dataDir: path.resolve(expandHome(cfg.dataDir)),
   };
   for (const sub of DATA_SUBDIRS) {

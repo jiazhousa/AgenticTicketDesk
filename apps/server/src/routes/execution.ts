@@ -99,18 +99,27 @@ export function registerExecutionRoutes(
         `工单 #${id} 当前为 ${ticket.status}（须终态方可回收；BLOCKED 存续期 worktree 保留供裁决复用）`,
       );
     }
-    runtime.worktree.reclaim(id, keepBranch);
+    // 回收仓路径按工单挂载解析（yaml 已删该 repo 声明时反查不可得 → 422 给修复指引）
+    const repoPath = runtime.workspaces.resolveRepoPath(ticket.workspaceId, ticket.repoRef);
+    if (repoPath == null) {
+      throw new AppError(
+        'REPO_REF_DRIFTED',
+        `repoRef 已失效：workspace=${ticket.workspaceId} repoRef=${ticket.repoRef ?? '(null)'}（workspaces yaml 声明已变更，无法定位回收目标仓）`,
+        ['修正 workspaces/*.yaml 恢复该仓声明后重试回收', '或确认该 worktree 目录已无保留价值后手动清理'],
+      );
+    }
+    runtime.worktree.reclaim(ticket.workspaceId, id, repoPath, keepBranch);
     return { ok: true };
   });
 
-  // POST /api/tickets/:blockerId/resolve —— 卡点裁决（继续/改派/终止）
-  app.post('/api/tickets/:blockerId/resolve', async (req) => {
-    const { blockerId } = parse(blockerParams, req.params);
+  // POST /api/tickets/:id/resolve —— 卡点裁决（继续/改派/终止；卡点=原单 BLOCKED 状态）
+  app.post('/api/tickets/:id/resolve', async (req) => {
+    const { id } = parse(idParams, req.params);
     const body = parse(resolveBody, req.body);
     if (!runtime) {
       throw new AppError('RESOLUTION_INVALID', '编排运行时未配置，无法裁决');
     }
-    return runtime.dispatcher.resolveBlocker(blockerId, body);
+    return { ticket: runtime.dispatcher.resolveTicket(id, body) };
   });
 
   // POST /api/tickets/:id/reopen —— 终态重开（留言即本轮指令，原 worktree 续跑）

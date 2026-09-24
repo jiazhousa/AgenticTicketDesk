@@ -1,0 +1,10 @@
+# ATD 自吃 workspace 声明（兼作模板）
+# id：workspace 标识（kebab-case，全局唯一）
+# name：显示名
+# repos：仓列表——path 相对本仓根目录或 ~ 展开；role=primary 主仓（恰一个，工单缺省目标），role=readable 可读仓
+id: atd
+name: ATD
+repos:
+  - id: atd
+    path: .
+    role: primary

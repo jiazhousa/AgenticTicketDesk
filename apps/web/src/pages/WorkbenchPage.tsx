@@ -3,19 +3,21 @@ import { Alert, Badge, Button, Card, Empty, Input, List, Modal, Space, Spin, Tag
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import {
-  getTicket,
   listTickets,
   submitSpec,
   transitionTicket,
 } from '../api/tickets';
-import type { Ticket, TicketDetail, TicketListItem } from '../api/types';
+import type { Ticket, TicketListItem } from '../api/types';
 import StatusLight from '../components/StatusLight';
 import StatusTag, { TypeTag, statusLabel } from '../components/StatusTag';
-import BlockerCard from '../components/BlockerCard';
+import BlockedResolutionCard from '../components/BlockedResolutionCard';
 import DispatchForm from '../components/DispatchForm';
 import CreateTicketModal from '../components/CreateTicketModal';
+import RepoRefTag from '../components/RepoRefTag';
 import { formatTime } from '../utils/format';
 import { useInterval } from '../utils/hooks';
+import { useWorkspace } from '../context/WorkspaceContext';
+import { useWorkspaceMap } from '../utils/workspace';
 
 /** 工作台轮询间隔 */
 const POLL_MS = 10000;
@@ -23,15 +25,15 @@ const POLL_MS = 10000;
 /**
  * 工作台（默认首页）= 人需要关注的内容，三区：
  * ① 新建单入口（弹窗含 TASK 预绑定 worker）
- * ② 阻塞区：BLOCKED 工单 + 待裁决 BLOCKER 卡（最高优先展示）
+ * ② 阻塞区：BLOCKED 工单（卡点内联：blockReason 摘要两行截断+展开，点「裁决」弹裁决卡直接处理）
  * ③ 待处理区：DRAFT / SPEC_READY 单，附「提交 spec / 放行」快捷操作
  */
 export default function WorkbenchPage() {
-  // 阻塞区数据（status=BLOCKED 一次拉全，前端按类型分流）
+  // 顶栏切换器所选 workspace（null=全部）；切换即触发下方 load 重建重拉
+  const { workspaceId } = useWorkspace();
+  const workspaceMap = useWorkspaceMap();
+  // 阻塞区数据（status=BLOCKED 一次拉全；blockReason 内联于列表项，无需逐单拉详情）
   const [blockedItems, setBlockedItems] = useState<TicketListItem[] | null>(null);
-  const [blockedDetails, setBlockedDetails] = useState<Map<number, TicketDetail>>(new Map());
-  // 阻塞 TASK 详情失败时兜底展示列表行；BLOCKER 孤儿（无配对父单）单独展示
-  const [orphanBlockers, setOrphanBlockers] = useState<TicketListItem[]>([]);
   // 待处理区数据
   const [draftItems, setDraftItems] = useState<TicketListItem[] | null>(null);
   const [readyItems, setReadyItems] = useState<TicketListItem[] | null>(null);
@@ -44,34 +46,20 @@ export default function WorkbenchPage() {
   const [submitting, setSubmitting] = useState(false);
   // TASK 放行弹层（DispatchForm 自管 worker 选择）
   const [dispatchTicket, setDispatchTicket] = useState<Ticket | null>(null);
+  // 卡点裁决弹层目标（BLOCKED 原单）
+  const [resolveTarget, setResolveTarget] = useState<Ticket | null>(null);
 
   const load = useCallback(async () => {
+    // workspaceId 不传=全量（「全部」视图）；三区同过滤口径
     const [blocked, draft, ready] = await Promise.all([
-      listTickets({ status: 'BLOCKED' }).catch(() => ({ items: [] as TicketListItem[] })),
-      listTickets({ status: 'DRAFT' }).catch(() => ({ items: [] as TicketListItem[] })),
-      listTickets({ status: 'SPEC_READY' }).catch(() => ({ items: [] as TicketListItem[] })),
+      listTickets({ status: 'BLOCKED', workspaceId: workspaceId ?? undefined }).catch(() => ({ items: [] as TicketListItem[] })),
+      listTickets({ status: 'DRAFT', workspaceId: workspaceId ?? undefined }).catch(() => ({ items: [] as TicketListItem[] })),
+      listTickets({ status: 'SPEC_READY', workspaceId: workspaceId ?? undefined }).catch(() => ({ items: [] as TicketListItem[] })),
     ]);
     setBlockedItems(blocked.items);
     setDraftItems(draft.items);
     setReadyItems(ready.items);
-
-    // 阻塞区配对：每个 BLOCKED TASK 拉详情（取关联 BLOCKER 与卡点说明）；失败降级为纯列表行
-    const blockedTasks = blocked.items.filter((t) => t.type !== 'BLOCKER');
-    const blockerTickets = blocked.items.filter((t) => t.type === 'BLOCKER');
-    const details = await Promise.all(
-      blockedTasks.map((t) => getTicket(t.id).catch(() => null)),
-    );
-    const map = new Map<number, TicketDetail>();
-    const pairedBlockerIds = new Set<number>();
-    details.forEach((d, i) => {
-      if (d) {
-        map.set(blockedTasks[i].id, d);
-        if (d.blocker != null) pairedBlockerIds.add(d.blocker.id);
-      }
-    });
-    setBlockedDetails(map);
-    setOrphanBlockers(blockerTickets.filter((b) => !pairedBlockerIds.has(b.id)));
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     void load();
@@ -115,9 +103,9 @@ export default function WorkbenchPage() {
   }
 
   const loading = blockedItems == null || draftItems == null || readyItems == null;
-  const blockedTasks = (blockedItems ?? []).filter((t) => t.type !== 'BLOCKER');
-  const readyTasks = (readyItems ?? []).filter((t) => t.type !== 'BLOCKER' && t.type !== 'DREAM');
-  const drafts = (draftItems ?? []).filter((t) => t.type !== 'BLOCKER' && t.type !== 'DREAM');
+  const blockedTickets = blockedItems ?? [];
+  const readyTasks = (readyItems ?? []).filter((t) => t.type !== 'DREAM');
+  const drafts = (draftItems ?? []).filter((t) => t.type !== 'DREAM');
 
   return (
     <div style={{ padding: 24, maxWidth: 1080, margin: '0 auto' }}>
@@ -146,70 +134,62 @@ export default function WorkbenchPage() {
           </div>
         ) : (
           <>
-            {/* 阻塞区：最高优先展示 */}
+            {/* 阻塞区：最高优先展示——卡点内联于原单，看到即可直接裁决 */}
             <Card
               title={
                 <Space>
                   <span>阻塞与待裁决</span>
-                  {blockedTasks.length + orphanBlockers.length > 0 && (
-                    <Badge count={blockedTasks.length + orphanBlockers.length} color="#ff4d4f" />
-                  )}
+                  {blockedTickets.length > 0 && <Badge count={blockedTickets.length} color="#ff4d4f" />}
                 </Space>
               }
-              style={{ borderColor: blockedTasks.length + orphanBlockers.length > 0 ? '#ffa39e' : undefined }}
+              style={{ borderColor: blockedTickets.length > 0 ? '#ffa39e' : undefined }}
             >
-              {blockedTasks.length === 0 && orphanBlockers.length === 0 ? (
+              {blockedTickets.length === 0 ? (
                 <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无阻塞单——一切顺畅" />
               ) : (
                 <Space direction="vertical" style={{ width: '100%' }} size="middle">
-                  {blockedTasks.map((task) => {
-                    const detail = blockedDetails.get(task.id);
-                    return (
-                      <div key={task.id}>
-                        <Space style={{ marginBottom: 4 }} wrap>
-                          <StatusLight status={task.status} />
-                          <TypeTag type={task.type} />
-                          <Link to={`/tickets/${task.id}`}>
-                            <Typography.Text strong>
-                              #{task.id} {task.title}
-                            </Typography.Text>
-                          </Link>
-                          {task.workerId != null && (
-                            <Tag style={{ marginInlineEnd: 0 }}>{task.workerId}</Tag>
-                          )}
-                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                            阻塞于 {formatTime(task.updatedAt)}
+                  {blockedTickets.map((task) => (
+                    <div key={task.id}>
+                      <Space style={{ marginBottom: 4 }} wrap>
+                        <StatusLight status={task.status} />
+                        <TypeTag type={task.type} />
+                        <Link to={`/tickets/${task.id}`}>
+                          <Typography.Text strong>
+                            #{task.id} {task.title}
                           </Typography.Text>
-                        </Space>
-                        {detail?.blocker != null ? (
-                          <BlockerCard
-                            blocker={detail.blocker}
-                            blockReason={detail.report?.blockReason ?? null}
-                            compact
-                            onChanged={() => void refreshAfterAction()}
-                          />
-                        ) : (
-                          <Alert
-                            type="warning"
-                            showIcon
-                            message={
-                              <>
-                                未见关联卡点单——请到 <Link to={`/tickets/${task.id}`}>详情页</Link> 查看转移历史与留言定位原因。
-                              </>
-                            }
-                          />
+                        </Link>
+                        {task.workerId != null && (
+                          <Tag style={{ marginInlineEnd: 0 }}>{task.workerId}</Tag>
                         )}
-                      </div>
-                    );
-                  })}
-                  {orphanBlockers.map((b) => (
-                    <BlockerCard
-                      key={b.id}
-                      blocker={b}
-                      blockReason={null}
-                      compact
-                      onChanged={() => void refreshAfterAction()}
-                    />
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          阻塞于 {formatTime(task.updatedAt)}
+                        </Typography.Text>
+                        <Button size="small" type="primary" onClick={() => setResolveTarget(task)}>
+                          裁决
+                        </Button>
+                      </Space>
+                      {task.blockReason != null ? (
+                        // 卡点原因摘要：两行截断+展开（全文裁决依据在裁决卡内等宽引用块展示）
+                        <Typography.Paragraph
+                          type="secondary"
+                          style={{ marginBottom: 0, paddingLeft: 4, fontSize: 12 }}
+                          ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
+                        >
+                          {task.blockReason}
+                        </Typography.Paragraph>
+                      ) : (
+                        // 契约上 BLOCKED 恒有 blockReason；缺失属数据异常
+                        <Alert
+                          type="warning"
+                          showIcon
+                          message={
+                            <>
+                              未见卡点原因——请到 <Link to={`/tickets/${task.id}`}>详情页</Link> 查看转移历史与留言定位原因。
+                            </>
+                          }
+                        />
+                      )}
+                    </div>
                   ))}
                 </Space>
               )}
@@ -270,6 +250,7 @@ export default function WorkbenchPage() {
                         <Link to={`/tickets/${t.id}`}>
                           #{t.id} {t.title}
                         </Link>
+                        <RepoRefTag ticket={t} workspaceMap={workspaceMap} />
                         {t.parentId != null && (
                           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                             父单 <Link to={`/tickets/${t.parentId}`}>#{t.parentId}</Link>
@@ -347,6 +328,26 @@ export default function WorkbenchPage() {
           }}
         />
       )}
+
+      {/* 卡点裁决弹层（BLOCKED 原单直接裁决：继续/改派/终止） */}
+      <Modal
+        title={resolveTarget != null ? `卡点裁决 —— #${resolveTarget.id} ${resolveTarget.title}` : '卡点裁决'}
+        open={resolveTarget != null}
+        footer={null}
+        onCancel={() => setResolveTarget(null)}
+        width={680}
+        destroyOnClose
+      >
+        {resolveTarget != null && (
+          <BlockedResolutionCard
+            ticket={resolveTarget}
+            onChanged={() => {
+              setResolveTarget(null);
+              void refreshAfterAction();
+            }}
+          />
+        )}
+      </Modal>
     </div>
   );
 }

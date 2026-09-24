@@ -6,6 +6,7 @@ import { vi, describe, expect, test } from 'vitest';
 import type { Status } from '../src/domain/status.js';
 import type { Ticket } from '../src/domain/ticket-service.js';
 import { FIXTURES_DIR, createRealContext, type TestContext } from './helpers.js';
+import { readReport } from '../src/report.js';
 
 // 本文件真实 spawn 子进程 + 临时 git 仓操作，整体放宽超时
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -78,7 +79,7 @@ describe('B1：全链——放行→worktree→spawn→报告 done→commits 落
     expect(done.workerId).toBe('fake');
 
     // commit 关联落库，sha 与 worktree 实际 HEAD 一致
-    const wt = ctx.worktree.pathFor(id);
+    const wt = ctx.worktree.pathFor('atd', id, ctx.repoPath);
     const head = execFileSync('git', ['-C', wt, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     const detail = ctx.service.getTicketDetail(id);
     expect(detail.commits).toEqual([{ round: 1, sha: head }]);
@@ -103,43 +104,41 @@ describe('B1：全链——放行→worktree→spawn→报告 done→commits 落
 });
 
 describe('B3：卡点三裁决（BLOCK_MODE 参数化分轮）', () => {
-  test('B3a 终止：blocked 报告→BLOCKED(pending:l3)+BLOCKER 单→裁决 abort→FAILED', async () => {
+  test('B3a 终止：blocked 报告→原单 BLOCKED(pending:l3)+blockReason 内联→裁决 abort→FAILED', async () => {
     const ctx = createRealContext({ autoDispatch: true, profiles: [{ id: 'fb', command: fixtureCmd('fake-blocked.mjs') }] });
     const id = await dispatchTicket(ctx, 'fb');
     const blocked = await waitStatus(ctx, id, ['BLOCKED']);
     expect(blocked.pendingLabel).toBe('l3');
     expect(blocked.round).toBe(1);
 
-    // BLOCKER 单：blockedBy 方向（父单依赖列表含 BLOCKER）+ 首条留言=blockReason
+    // 内联卡点：原单 blockReason 落库 + system 留言（时间线可见全文）
     const detail = ctx.service.getTicketDetail(id);
-    expect(detail.blocker).toMatchObject({ type: 'BLOCKER', status: 'BLOCKED', pendingLabel: 'l3' });
-    expect(detail.blocker!.title).toBe('卡点: 测试任务');
-    expect(detail.dependencies.map((d) => d.id)).toContain(detail.blocker!.id);
-    const blockerComments = ctx.service.getTicketDetail(detail.blocker!.id).comments;
-    expect(blockerComments.at(-1)).toMatchObject({ authorType: 'system' });
-    expect(blockerComments.at(-1)!.content).toContain('外部审批未通过');
+    expect(detail.ticket.blockReason).toContain('外部审批未通过');
+    const commentsA = detail.comments;
+    expect(commentsA.at(-1)).toMatchObject({ authorType: 'system' });
+    expect(commentsA.at(-1)!.content).toContain('外部审批未通过');
 
     const res = await ctx.app.inject({
       method: 'POST',
-      url: `/api/tickets/${detail.blocker!.id}/resolve`,
+      url: `/api/tickets/${id}/resolve`,
       payload: { resolution: 'abort', note: '终止方案' },
     });
     expect(res.statusCode).toBe(200);
     await waitStatus(ctx, id, ['FAILED']);
-    expect(ctx.service.getTicket(detail.blocker!.id).status).toBe('DONE');
+    // 转出 BLOCKED 清空卡点字段
+    expect(ctx.service.getTicket(id).blockReason).toBeNull();
   });
 
   test('B3b 继续：原 worktree round+1 重 spawn→DONE（BLOCK_MODE=done）', async () => {
     const ctx = createRealContext({ autoDispatch: true, profiles: [{ id: 'fb', command: fixtureCmd('fake-blocked.mjs') }] });
     const id = await dispatchTicket(ctx, 'fb');
     await waitStatus(ctx, id, ['BLOCKED']);
-    const blocker = ctx.service.getTicketDetail(id).blocker!;
 
     process.env.BLOCK_MODE = 'done';
     try {
       const res = await ctx.app.inject({
         method: 'POST',
-        url: `/api/tickets/${blocker.id}/resolve`,
+        url: `/api/tickets/${id}/resolve`,
         payload: { resolution: 'continue', note: '按方案 B 继续' },
       });
       expect(res.statusCode).toBe(200);
@@ -151,8 +150,8 @@ describe('B3：卡点三裁决（BLOCK_MODE 参数化分轮）', () => {
       // 原 worktree 复用：两轮日志对都在
       expect(existsSync(path.join(ctx.config.dataDir, 'logs', `t${id}.r1.raw.jsonl`))).toBe(true);
       expect(existsSync(path.join(ctx.config.dataDir, 'logs', `t${id}.r2.raw.jsonl`))).toBe(true);
-      // 裁决 note 落 BLOCKER 留言
-      const comments = ctx.service.getTicketDetail(blocker.id).comments;
+      // 裁决 note 落原单留言
+      const comments = ctx.service.getTicketDetail(id).comments;
       expect(comments.at(-1)).toMatchObject({ authorType: 'user', content: '按方案 B 继续' });
     } finally {
       delete process.env.BLOCK_MODE;
@@ -169,14 +168,13 @@ describe('B3：卡点三裁决（BLOCK_MODE 参数化分轮）', () => {
     });
     const id = await dispatchTicket(ctx, 'fb');
     await waitStatus(ctx, id, ['BLOCKED']);
-    const wt = ctx.worktree.pathFor(id);
+    const wt = ctx.worktree.pathFor('atd', id, ctx.repoPath);
     // r1（blocked 轮）的 marker 提交
     const r1Sha = execFileSync('git', ['-C', wt, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-    const blocker = ctx.service.getTicketDetail(id).blocker!;
 
     const res = await ctx.app.inject({
       method: 'POST',
-      url: `/api/tickets/${blocker.id}/resolve`,
+      url: `/api/tickets/${id}/resolve`,
       payload: { resolution: 'reassign', reassignWorkerId: 'falt' },
     });
     expect(res.statusCode).toBe(200);
@@ -275,13 +273,13 @@ describe('B6：报告缺失——L2 重试（round=2 可见）→ 仍缺 → L3 
     expect(blocked.pendingLabel).toBe('l3');
 
     const detail = ctx.service.getTicketDetail(id);
-    const blocker = detail.blocker!;
-    expect(blocker).toBeTruthy();
-    const first = ctx.service.getTicketDetail(blocker.id).comments[0];
-    // 留言 authorType=system + 含最后一轮 raw 路径
-    expect(first.authorType).toBe('system');
-    expect(first.content).toContain('报告缺失');
-    expect(first.content).toContain(`t${id}.r2.raw.jsonl`);
+    // 内联卡点：原单 blockReason 含最后一轮 raw 路径 + system 留言全文
+    expect(detail.ticket.blockReason).toContain('报告缺失');
+    expect(detail.ticket.blockReason).toContain(`t${id}.r2.raw.jsonl`);
+    const last = detail.comments.at(-1)!;
+    expect(last.authorType).toBe('system');
+    expect(last.content).toContain('报告缺失');
+    expect(last.content).toContain(`t${id}.r2.raw.jsonl`);
     // 两轮日志都在
     expect(existsSync(path.join(ctx.config.dataDir, 'logs', `t${id}.r1.raw.jsonl`))).toBe(true);
     expect(existsSync(path.join(ctx.config.dataDir, 'logs', `t${id}.r2.raw.jsonl`))).toBe(true);
@@ -295,7 +293,7 @@ describe('pre-spawn 运行期失败 → DISPATCHED→CANCELLED + 留言', () => 
     ctx.service.submitSpec(t.id, '# spec');
     // 提前用普通文件占住 worktree 路径（allocate 复用分支→后续 git 操作失败）
     mkdirSync(path.join(ctx.config.dataDir, 'worktrees'), { recursive: true });
-    writeFileSync(ctx.worktree.pathFor(t.id), 'not a dir');
+    writeFileSync(ctx.worktree.pathFor('atd', t.id, ctx.repoPath), 'not a dir');
     const res = await ctx.app.inject({
       method: 'POST',
       url: `/api/tickets/${t.id}/transition`,
@@ -396,5 +394,16 @@ describe('F1/F4：终态重开与编排链自动放行（验收反馈）', () =>
     await waitStatus(ctx, a.id, ['DONE']);
     // b 无 parent：不自动放行，保持人工控制
     expect(ctx.service.getTicket(b.id).status).toBe('SPEC_READY');
+  });
+});
+
+describe('报告 schema 容忍 null 字段【S2w1 hotfix】', () => {
+  test('atd-report.json 显式 null 的 commits/blockReason 可正常解析（done）', () => {
+    const dir = path.join(tmpdir(), `atd-report-null-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, 'atd-report.json'),
+      JSON.stringify({ status: 'done', summary: 's', commits: null, blockReason: null }));
+    const r = readReport(dir);
+    expect(r.ok).toBe(true);
   });
 });
