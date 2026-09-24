@@ -16,9 +16,9 @@ const STATUS_OPTIONS: { value: TicketStatus; label: string }[] = (
   ['DRAFT', 'SPEC_READY', 'DISPATCHED', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'CANCELLED', 'FAILED'] as TicketStatus[]
 ).map((s) => ({ value: s, label: statusLabel(s) }));
 
-/** 类型筛选项：建单全集 + BLOCKER（卡点队列入口，spec §5） */
+/** 类型筛选项：建单全集（BLOCKER 类型已废除——卡点=原单 BLOCKED 状态，不再是工单类型） */
 const TYPE_OPTIONS: { value: TicketType; label: string }[] = (
-  ['STORY', 'TASK', 'BLOCKER'] as TicketType[]
+  ['STORY', 'TASK'] as TicketType[]
 ).map((t) => ({ value: t, label: typeLabel(t) }));
 
 /** 全量列表页（兜底视图）：日常入口在工作台/仪表盘，本页保留完整表格与筛选；workspace 维度过滤统一收口顶栏切换器 */
@@ -122,7 +122,22 @@ export default function TicketListPage() {
                 );
               },
             },
-            { title: '状态', dataIndex: 'status', width: 110, render: (status: TicketStatus) => <StatusTag status={status} /> },
+            {
+              title: '状态',
+              dataIndex: 'status',
+              width: 150,
+              render: (_, record) => (
+                <Space size={4}>
+                  <StatusTag status={record.status} />
+                  {/* BLOCKED=卡点内联待裁决，红标提醒（裁决入口在工作台/详情页） */}
+                  {record.status === 'BLOCKED' && (
+                    <Tag color="red" style={{ marginInlineEnd: 0 }}>
+                      待裁决
+                    </Tag>
+                  )}
+                </Space>
+              ),
+            },
             {
               title: '父单',
               width: 200,

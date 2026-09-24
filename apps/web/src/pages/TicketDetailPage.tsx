@@ -14,14 +14,14 @@ import Timeline from '../components/Timeline';
 import ExecutionCard from '../components/ExecutionCard';
 import StorySwimlane from '../components/StorySwimlane';
 import ReportCard from '../components/ReportCard';
-import BlockerCard from '../components/BlockerCard';
+import BlockedResolutionCard from '../components/BlockedResolutionCard';
 import { formatTime } from '../utils/format';
 import { useWorkspaceMap } from '../utils/workspace';
 
 /**
  * 工单详情页（验收反馈后瘦身）：执行卡只留 状态/worker/轮次/时长 + 日志入口——
  * worker 原始事件流不在详情页展示（独立日志页）。卡布局：
- * ①基本信息+状态操作 ②执行卡（瘦身后）③完成报告（DONE）④卡点处理（BLOCKED/BLOCKER）
+ * ①基本信息+状态操作 ②执行卡（瘦身后）③完成报告（DONE）④卡点裁决（BLOCKED——卡点内联于本单状态）
  * ⑤Story 泳道链（STORY 核心区块：子单依赖 DAG）⑥spec 快照 ⑦依赖与父子 ⑧留言+时间线。
  * hasCancelledChildren=true 时顶部 Alert 提示（A7 锚点：CANCELLED 子单不阻塞父单关单，需人工裁决）。
  */
@@ -81,7 +81,7 @@ export default function TicketDetailPage() {
     );
   }
 
-  const { ticket, blocks } = detail;
+  const { ticket } = detail;
 
   return (
     <div style={{ padding: 24 }}>
@@ -167,27 +167,9 @@ export default function TicketDetailPage() {
           <ReportCard report={detail.report} commits={detail.commits} />
         )}
 
-        {/* 卡4：卡点处理——父单视角（BLOCKED 态关联未关 BLOCKER） */}
-        {ticket.status === 'BLOCKED' &&
-          (detail.blocker != null ? (
-            <BlockerCard
-              blocker={detail.blocker}
-              blockReason={detail.report?.blockReason ?? null}
-              onChanged={() => reload()}
-            />
-          ) : (
-            // 编排层保证 BLOCKED 存续期间恰好关联一张未关 BLOCKER；缺失属数据异常
-            <Alert
-              type="error"
-              showIcon
-              message="数据异常：阻塞态未关联卡点单"
-              description="该工单处于阻塞状态但没有对应的未关卡点单，请检查数据一致性。"
-            />
-          ))}
-
-        {/* 卡4：卡点处理——BLOCKER 单自身视角（resolve 入口；卡点单呈现 BLOCKED(pending:l3)） */}
-        {ticket.type === 'BLOCKER' && ticket.status === 'BLOCKED' && (
-          <BlockerCard blocker={ticket} parentTicketId={blocks[0]?.id} onChanged={() => reload()} />
+        {/* 卡4：卡点裁决（BLOCKED 态内联：卡点=本单状态，blockReason 全文展示，直接裁决转出） */}
+        {ticket.status === 'BLOCKED' && (
+          <BlockedResolutionCard ticket={ticket} onChanged={() => reload()} />
         )}
 
         {/* 卡5：Story 泳道链（STORY 核心区块：子单依赖分层 DAG，并行同列、串行向下） */}

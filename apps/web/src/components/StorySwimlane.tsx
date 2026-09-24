@@ -21,7 +21,7 @@ type SwimNode = {
   ticket: Ticket;
   /** 内部依赖（兄弟单） */
   deps: Ticket[];
-  /** 外部依赖（如 BLOCKER 卡点单、非本 STORY 子单的依赖），提示用 */
+  /** 外部依赖（非本 STORY 子单的依赖，如跨单依赖），提示用 */
   externalDeps: Ticket[];
 };
 

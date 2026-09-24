@@ -12,8 +12,8 @@ import ReopenModal from './ReopenModal';
  * - DRAFT →「提交 spec」走 POST /api/tickets/:id/spec（独立路径，非 transition）
  * - STORY（纯编排）：S1 人工边全保留（含开始执行/完成关单，人工推进）
  * - TASK（执行单）：仅 user 白名单边——放行派发（需选 worker，走 DispatchForm）/ 取消；
- *   执行推进边（开始/完成/转阻塞/失败）由 dispatcher system 通道自动流转，user 请求 → 422 MANUAL_FORBIDDEN
- * - BLOCKER：不提供常规转移（关单走卡点裁决，见 BlockerCard）
+ *   执行推进边（开始/完成/转阻塞/失败）由 dispatcher system 通道自动流转，user 请求 → 422 MANUAL_FORBIDDEN；
+ *   BLOCKED 态的裁决走 BlockedResolutionCard（/resolve 端点），此处仅保留取消边
  * - 终态 TASK：「重新开单」（留言即本轮指令，原 worktree 续跑，走 /reopen 端点）
  * - 终态（DONE/CANCELLED/FAILED）STORY 无出边，不渲染按钮
  * 服务端 422（非法转移/门禁未过/越权手推）的 message 已由 api 层统一 toast 原样透出。
@@ -21,8 +21,8 @@ import ReopenModal from './ReopenModal';
 
 /** user 可达后继白名单（按 type 分流；与 server §1 通道二分一致） */
 function userNextStatuses(type: TicketType, status: TicketStatus): TicketStatus[] {
-  if (type === 'BLOCKER' || type === 'DREAM') {
-    // BLOCKER 关单走 /resolve 裁决端点；DREAM 为占位类型
+  if (type === 'DREAM') {
+    // DREAM 为占位类型，无 user 边
     return [];
   }
   if (type === 'TASK') {
@@ -109,7 +109,7 @@ export default function TransitionActions({ ticket, onChanged }: { ticket: Ticke
 
   return (
     <Space wrap>
-      {ticket.status === 'DRAFT' && ticket.type !== 'BLOCKER' && ticket.type !== 'DREAM' && (
+      {ticket.status === 'DRAFT' && ticket.type !== 'DREAM' && (
         <Button type="primary" onClick={openSpecModal}>
           提交 spec
         </Button>
@@ -124,9 +124,6 @@ export default function TransitionActions({ ticket, onChanged }: { ticket: Ticke
           {ACTION_LABEL[to] ?? to}
         </Button>
       ))}
-      {isTerminal && ticket.type === 'BLOCKER' && (
-        <Typography.Text type="secondary">本单为卡点单，关单通过「卡点处理」区的裁决完成</Typography.Text>
-      )}
       {isTerminal && ticket.type === 'TASK' && (
         <Button icon={<RedoOutlined />} onClick={() => setModal('reopen')}>
           重新开单

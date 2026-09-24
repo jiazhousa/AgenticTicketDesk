@@ -9,7 +9,8 @@ import type {
   CreateTicketRequest,
   LogsResponse,
   ReopenRequest,
-  ResolveBlockerRequest,
+  ResolveTicketRequest,
+  ResolveTicketResponse,
   Ticket,
   TicketComment,
   TicketDetail,
@@ -199,11 +200,12 @@ export function getLogs(
 }
 
 /**
- * POST /api/tickets/:blockerId/resolve —— 卡点裁决关单（BLOCKER→DONE + 按裁决转父单）。
- * 返回体不消费（成功后调用方重载详情）。
+ * POST /api/tickets/:id/resolve —— 卡点裁决（id=阻塞原单；卡点内联语义，无独立卡点单）。
+ * continue=原 worktree 续跑 / reassign=换 worker 续跑 / abort=原单 FAILED。
+ * 返回转出后的原单；非 BLOCKED 态 422 RESOLUTION_INVALID。
  */
-export function resolveBlocker(blockerId: number, req: ResolveBlockerRequest): Promise<void> {
-  return request<void>(`/api/tickets/${blockerId}/resolve`, {
+export function resolveTicket(id: number, req: ResolveTicketRequest): Promise<ResolveTicketResponse> {
+  return request<ResolveTicketResponse>(`/api/tickets/${id}/resolve`, {
     method: 'POST',
     body: JSON.stringify(req),
   });
