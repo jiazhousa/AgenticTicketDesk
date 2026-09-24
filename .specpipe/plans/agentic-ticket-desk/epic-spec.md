@@ -23,7 +23,7 @@
 整个系统本质是一个工单系统：状态机 + 留言流 + 父子依赖 DAG + 结构化附件（spec 快照）。人和 Agent 互为 worker：
 
 - Agent 的单（Story/Task）出现在人的看板
-- 人的单（卡点 BLOCKER）出现在 Agent 的挂起队列，处理完关单即放行
+- 卡点内联为原单 BLOCKED 状态（blockReason 字段承载上下文），工作台看到阻塞单直接裁决（继续/改派/终止）
 
 工单是被验证 30 年的形态（Jira/GitHub Issues），人的心智模型零培训成本；「人需要懂业务原语」由工单描述语言承载。
 
@@ -33,11 +33,11 @@
 |---|---|
 | **S1-S4** | Story 编号（本 Epic 的交付单元，见 §9 路线图） |
 | **M1/M2/M3/M4** | 里程碑：M1=最小闭环（S1+S2a+S2b）/ M2=并行与分级（S3）/ M3=夜间审计（S4）/ M4=GitHub Issues 同步（本 Epic 非目标，占位后续） |
-| **路由级别 L1/L2/L3** | 编排层对**卡点（异常/需决策事件）**的三级处理机制：L1=执行 worker 自决留痕 / L2=编排层规则仲裁 / L3=升级为 BLOCKER 工单给人。L1/L2 是内部决策机制，**不产生工单**；只有 L3 落为 BLOCKER 工单 |
+| **路由级别 L1/L2/L3** | 编排层对**卡点（异常/需决策事件）**的三级处理机制：L1=执行 worker 自决留痕 / L2=编排层规则仲裁 / L3=原单转 BLOCKED(pending:l3) 给人。L1/L2 是内部决策机制，**不产生工单**；L3 也不产生独立工单（卡点=原单状态，2026-09-24 用户拍板内联语义，取代早期 BLOCKER 独立单设计） |
 | **pending:l3 / pending:agent** | 工单进入 BLOCKED 态时的两个标签：pending:l3=等**人**处理（L3 卡点）/ pending:agent=等**系统条件**（重试倒计时/依赖等待/超时恢复）。二者是 BLOCKED 态的子标签，与 L1/L2/L3 的映射见 §4.2 |
 | **spec 快照** | 工单创建时冻结的 spec 版本；在途工单的 spec 不开缝修改 |
 | **变更单** | spec 需变更时新开的工单，blockedBy 关联受影响的在途工单；旧单快照不回改，人在旧单上决定继续（按旧快照）/合并（吸收变更单）/取消 |
-| **BLOCKER 单** | 卡点工单（类型 BLOCKER），blockedBy 挂在父 TASK/STORY 单上；关单时裁决：继续（父单恢复 IN_PROGRESS）/终止（父单 FAILED）/改派（父单 DISPATCHED 换 worker） |
+| **卡点（内联）** | 原单 BLOCKED 状态 + blockReason 字段（worker 报告全文或系统判定描述）+ system 留言留痕；裁决即原单操作：继续（恢复执行）/终止（FAILED）/改派（换 worker 续跑），裁决 note 落原单留言 |
 
 ## 4. 核心概念与领域模型
 
@@ -45,12 +45,12 @@
 
 | 字段域 | 内容 |
 |---|---|
-| 类型 | STORY / TASK / BLOCKER / DREAM（系统内部审计单） |
+| 类型 | STORY / TASK / DREAM（系统内部审计单）；卡点为 TASK 的 BLOCKED 状态而非独立类型 |
 | 状态机 | 见 §5 |
 | 父子与依赖 | parent-child + blockedBy（DAG）；子单全 DONE → 父单可推进（编排层聚合，非 DB 约束）；**编排链自动流转：有 parent 的 TASK 单，其 blockedBy 依赖全部 DONE 时由编排层自动 DISPATCHED（放行前置三件套照常校验）；无 parent 的独立单保持人工放行** |
 | spec 快照 | 创建时冻结；变更走变更单（§3 术语表） |
-| 留言流 | 人/Agent 双方留言；BLOCKER 单的留言即卡点上下文 |
-| worker 绑定 | TASK/DREAM 单绑定执行 worker；STORY 纯编排不直接执行；BLOCKER 绑定人（系统内唯一"人单"） |
+| 留言流 | 人/Agent 双方留言；卡点报告与裁决记录均落原单时间线 |
+| worker 绑定 | TASK/DREAM 单绑定执行 worker；STORY 纯编排不直接执行 |
 | commit 关联 | TASK 单完成报告强制携带 commit hash 列表，DB 关联表落库（S4 审计按此抽取 diff） |
 
 ### 4.2 卡点路由与 pending 闭环（完整机制）
@@ -60,16 +60,16 @@
         │
         ├─ L1 执行 worker 自决 → 留痕（工单日志），流程继续，无工单产生
         ├─ L2 编排层规则仲裁 → 调度动作：重试/排队 → BLOCKED(pending:agent)；换 worker → DISPATCHED。无工单产生
-        └─ L3 升级 → 父单转 BLOCKED(pending:l3) + 自动创建 BLOCKER 子单
-                     （BLOCKER 单自包含：上下文+选项化建议+影响面）
+        └─ L3 升级 → 原单转 BLOCKED(pending:l3)，blockReason 内联卡点上下文
+                     （+system 留言全文；工作台/详情直接裁决三选）
 
 BLOCKED(pending:agent) 的进入条件：重试倒计时 / 等待依赖单 / 临时资源不足
         │
         ├─ 条件满足 → 自动恢复 IN_PROGRESS
-        └─ 重试达上限（默认 3 次，yaml 可配）→ 自动升级 pending:l3 + 生成 BLOCKER 单
-                     （升级原因写入 BLOCKER：连续自愈失败）
+        └─ 重试达上限（默认 3 次，yaml 可配）→ 原单升级 BLOCKED(pending:l3)
+                     （blockReason 记录连续自愈失败详情）
 
-BLOCKER 单关单人裁决：继续（父单恢复）/ 终止（父单 FAILED）/ 改派（父单 DISPATCHED）
+卡点裁决（原单操作）：继续（恢复执行）/ 终止（FAILED）/ 改派（换 worker 续跑）
 ```
 
 要点：pending:agent 是**技术性等待**（有明确恢复条件），pending:l3 是**决策性等待**（必须人介入）；pending:agent 有重试上限，超限自动降级为 l3——不存在无限静默重试，也不存在永远无人理会的卡点。
@@ -104,7 +104,7 @@ BLOCKER 单关单人裁决：继续（父单恢复）/ 终止（父单 FAILED）
 ### 4.5 夜间审计（dream job）
 
 - 触发：低峰窗口（cron）+ 仓空闲判定（无 IN_PROGRESS 工单）
-- 作业：specLive 比对——当日 diff（按 §4.1 commit 关联抽取）vs spec 快照，drift 三分支归因：走过放行的变更但 spec 未更新 → 自动更新 liveSpec 留痕 / 无放行记录的私改 → BLOCKER 单 / 语义歧义 → 报告单（DREAM 类型，pending:l3）
+- 作业：specLive 比对——当日 diff（按 §4.1 commit 关联抽取）vs spec 快照，drift 三分支归因：走过放行的变更但 spec 未更新 → 自动更新 liveSpec 留痕 / 无放行记录的私改 → 报告单（DREAM 类型，pending:l3）/ 语义歧义 → 报告单（DREAM 类型，pending:l3）
 - **审计本身也是工单**（DREAM 单绑定 worker 执行比对任务）——吃自己狗粮
 - 知识库沉淀：审计产出入知识库（Markdown 落盘 + 索引），消费方为后续工单的上下文注入与 spec 生成；**知识库对 worker 开放检索**（MVP：知识库目录路径注入 prompt，worker 以 grep/读文件自主检索加载；进阶：结构化索引+检索端点）——项目知识（AGENTS.md/spec 归档/审计产出）统一此处汇聚
 - 熵治理自动重构为**非目标**（§14）——dream 只审计不修改
@@ -128,19 +128,19 @@ ATD 终态是**多项目迭代面板**（不只开发 ATD 自身）——Workspa
 ```
 DRAFT → SPEC_READY → DISPATCHED → IN_PROGRESS → DONE
               │           │            │
-              │           │            ├─ BLOCKED(pending:l3)  ──人关 BLOCKER──→ IN_PROGRESS / FAILED / DISPATCHED(改派)
+              │           │            ├─ BLOCKED(pending:l3)  ──人裁决──→ IN_PROGRESS / FAILED / DISPATCHED(改派)
               │           │            └─ BLOCKED(pending:agent) ─条件满足──→ IN_PROGRESS
               │           │                                          └─重试超限──→ BLOCKED(pending:l3)
               │           └─ 撤回 → CANCELLED
               └─ 拒绝 → CANCELLED
 BLOCKED → CANCELLED（人为取消，允许）
-IN_PROGRESS → FAILED（仅两种入边：worker 不可恢复终止；BLOCKER 裁决终止）
+IN_PROGRESS → FAILED（仅两种入边：worker 不可恢复终止；卡点裁决终止）
 FAILED 不设自动恢复；补救 = 人工重开新工单（blockedBy 关联 FAILED 单可追溯）
 ```
 
 - BLOCKED 入边全集：IN_PROGRESS → BLOCKED(pending:l3)（L3 卡点）或 BLOCKED(pending:agent)（L2 重试/排队、依赖等待、资源不足）——与 §4.2 一致
 - STORY 类型不绑定 worker：子单全部 DONE 后父单进入「可关单」（人工确认 DONE）；任一子单 FAILED/CANCELLED 时提示人裁决（继续剩余子单/取消父单）
-- 里程碑裁剪：M1 实现 DRAFT/SPEC_READY/DISPATCHED/IN_PROGRESS/DONE/CANCELLED；**BLOCKED(pending:l3) 与 BLOCKER 单随 S2a**（L3 是 S2a 解单闭环的组成部分）；pending:agent 重试引擎随 S3；DREAM 是**工单类型**（复用 TASK 同款状态机），随 S4 引入
+- 里程碑裁剪：M1 实现 DRAFT/SPEC_READY/DISPATCHED/IN_PROGRESS/DONE/CANCELLED；**BLOCKED(pending:l3) 随 S2a**（L3 是 S2a 解单闭环的组成部分；卡点独立单形态已于 2026-09-24 内联化）；pending:agent 重试引擎随 S3；DREAM 是**工单类型**（复用 TASK 同款状态机），随 S4 引入
 - DISPATCHED：已选定 worker 与 worktree，尚未开始执行；IN_PROGRESS：worker 已产出首个事件
 
 ## 6. 安全底线（MUST 条款，违反即实现缺陷）
@@ -175,7 +175,7 @@ apps/
                 ├─ 看板（工单列表/状态流转/依赖树）
                 ├─ 工单详情（spec 快照/留言流/worker 日志/commit 列表）
                 ├─ HumanThink 聊天框（interactive 事件流渲染）
-                └─ 卡点队列（BLOCKER 单列表/裁决操作）
+                └─ 卡点队列（BLOCKED 单列表/直接裁决操作）
 packages/
   worker-core/      Worker 接口 + HarnessV1 对齐的事件流类型 + profile yaml schema
   worker-opencode/  预置 opencode profile（task: spawn `run --format json --dir <worktree>`；interactive: attach 常驻 serve + session API，决策 D）
@@ -188,12 +188,12 @@ packages/
 | Story | 内容 | 依赖 | 验收标准 |
 |---|---|---|---|
 | **S1** 核心域骨架 | 工单 CRUD/状态机（M1 裁剪版）/DAG 数据模型/留言/SQLite/API + 最小看板（列表/详情/流转/留言） | — | ① 手工建父子工单并走完 DRAFT→DONE 全程 ② 非法状态转移被 API 拒绝 ③ 留言双向可读 ④ 看板列表/详情/流转操作可用 |
-| **S2a** Worker 层+解单闭环 | worker-core 接口 + Registry（yaml）+ worker-opencode task 模式 + worktree 管理 + 卡点路由（L1 留痕/L2 基础调度/**L3+BLOCKED(pending:l3)+BLOCKER 单**） | S1 | ① 建 TASK 单→DISPATCHED→opencode 在 worktree 解单→commit→DONE 全链 ② MUST-1/2/5/6 生效（无 worktree 拒派/权限注入/日志落盘/凭据环境变量注入）③ 完成报告 schema 化（含 commit 列表）④ worker 崩溃→FAILED 可复现 ⑤ worker 报卡点→L3 路径生效：父单 BLOCKED(pending:l3)+BLOCKER 单创建，人关 BLOCKER 裁决（继续/终止/改派）三路恢复正确 |
+| **S2a** Worker 层+解单闭环 | worker-core 接口 + Registry（yaml）+ worker-opencode task 模式 + worktree 管理 + 卡点路由（L1 留痕/L2 基础调度/**L3+BLOCKED(pending:l3)+BLOCKER 单**） | S1 | ① 建 TASK 单→DISPATCHED→opencode 在 worktree 解单→commit→DONE 全链 ② MUST-1/2/5/6 生效（无 worktree 拒派/权限注入/日志落盘/凭据环境变量注入）③ 完成报告 schema 化（含 commit 列表）④ worker 崩溃→FAILED 可复现 ⑤ worker 报卡点→L3 路径生效：原单 BLOCKED(pending:l3)+blockReason 内联，人直接裁决（继续/终止/改派）三路恢复正确 |
 | **S2w1** Workspace 多项目基座 | workspace 模型（workspaces/ 声明式 yaml，repos 主从声明）+ 工单挂 workspace + TASK 目标仓 repoRef + worker 按仓开 worktree + 前端 workspace 切换器 + 存量零迁移兼容 | S2a | ① 声明两个 workspace（各含主仓+可读仓），切换后建单/执行互不串仓 ② TASK 指定非主仓 repoRef → worktree 建在该仓、分支/日志按仓隔离 ③ 仓内自带 atd.yaml（存量工单经 migration DEFAULT 归属 atd），S2a 既有行为零回归 |
 | **S2b1** HumanThink 聊天框 | interactive 模式（standalone 实例池，cwd=workspace 主仓，可读仓范围注入权限）+ 消息 server 镜像 + 聊天 UI | S2w1 | ① 聊天框选 opencode 承载，流式渲染（text-delta）② 会话历史入库可检索 ③ 实例与用户共享 server 零干扰（standalone）④ 可读范围受 workspace 白名单约束 |
 | **S2b2** 编排 agent 拆单链 | oracle/explorer agent 定义 + profile {{agent}} 变量 + 对话→调研→spec+跨仓 Task DAG 草稿 → **人工确认门** → 建单建链（预绑定+依赖）→ 泳道呈现 | S2b1 | ① 会话中产出 spec+DAG 草稿（Task 含 repoRef/workerId/依赖）可编辑 ② 确认门放行→自动建单（含快照+预绑定），编排链自动流转生效 ③ 跨仓 DAG（如三仓并行→测试→MR）各 Task 在正确仓执行 |
-| **S3** 并行+pending:agent | worktree 池 + 并发闸门 + 文件集不相交校验 + BLOCKED(pending:agent) 重试引擎（上限→自动升级 l3）+ 卡点队列 UI（BLOCKER 聚合视图） | S2a | ① 两 TASK 单并行解单互不干扰（文件集相交被拒）② pending:agent 超限自动升级 BLOCKER ③ 并发闸门限流可配 |
-| **S4** 夜间审计 | DREAM 工单 + cron 调度 + diff 抽取（commit 关联）+ specLive 比对 + drift 三分支归因 + 知识库沉淀 | S3 | ① 定时窗口自动产出 DREAM 单并执行 ② 三分支归因各有构造用例验证 ③ 无放行记录的私改产生 BLOCKER ④ 知识库落盘可被新工单 spec 生成引用 |
+| **S3** 并行+pending:agent | worktree 池 + 并发闸门 + 文件集不相交校验 + BLOCKED(pending:agent) 重试引擎（上限→自动升级 l3）+ 卡点队列 UI（BLOCKED 单聚合视图） | S2a | ① 两 TASK 单并行解单互不干扰（文件集相交被拒）② pending:agent 超限自动升级 BLOCKER ③ 并发闸门限流可配 |
+| **S4** 夜间审计 | DREAM 工单 + cron 调度 + diff 抽取（commit 关联）+ specLive 比对 + drift 三分支归因 + 知识库沉淀 | S3 | ① 定时窗口自动产出 DREAM 单并执行 ② 三分支归因各有构造用例验证 ③ 无放行记录的私改产生 DREAM 报告单 ④ 知识库落盘可被新工单 spec 生成引用 |
 
 依赖关系：S1 → S2a → S2w1 → {S2b1 → S2b2, S3}（S2b 链与 S3 互相独立，可任意顺序或并行）→ S4。
 
@@ -206,7 +206,7 @@ packages/
 Epic 完成的判定不是 S4 交付，而是**用本系统真实吃狗粮**：
 
 1. 在一个真实 git 仓上，通过 HumanThink 聊天框完成一次真实小需求的「沟通→spec→放行→解单→关单」全链，全程不打开终端
-2. 该过程中人为制造一个卡点，验证 BLOCKER 单→人裁决→恢复的全流程
+2. 该过程中人为制造一个卡点，验证原单 BLOCKED→人裁决→恢复的全流程
 3. 夜间审计对当次真实变更产出 drift 报告（至少验证「走过放行→liveSpec 更新」分支）
 4. 上述全过程的事件流/日志/commit 关联完整可溯源
 
