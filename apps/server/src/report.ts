@@ -3,14 +3,14 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 
-/** 完成报告 schema（worker 在 worktree 根写 atd-report.json） */
+/** 完成报告 schema（worker 在 worktree 根写 atd-report.json；可选字段均收 null——JSON 直觉写法） */
 const atdReportSchema = z
   .object({
     status: z.enum(['done', 'blocked']),
     summary: z.string().min(1),
     /** 报告声明 commits 仅作交叉校验，落库以 git 实测为准 */
-    commits: z.array(z.string()).optional(),
-    blockReason: z.string().optional(),
+    commits: z.array(z.string()).nullable().optional(),
+    blockReason: z.string().nullable().optional(),
   })
   .superRefine((v, ctx) => {
     if (v.status === 'blocked' && !(v.blockReason ?? '').trim()) {

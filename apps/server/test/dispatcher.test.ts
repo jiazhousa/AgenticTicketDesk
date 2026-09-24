@@ -6,6 +6,7 @@ import { vi, describe, expect, test } from 'vitest';
 import type { Status } from '../src/domain/status.js';
 import type { Ticket } from '../src/domain/ticket-service.js';
 import { FIXTURES_DIR, createRealContext, type TestContext } from './helpers.js';
+import { readReport } from '../src/report.js';
 
 // 本文件真实 spawn 子进程 + 临时 git 仓操作，整体放宽超时
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -396,5 +397,16 @@ describe('F1/F4：终态重开与编排链自动放行（验收反馈）', () =>
     await waitStatus(ctx, a.id, ['DONE']);
     // b 无 parent：不自动放行，保持人工控制
     expect(ctx.service.getTicket(b.id).status).toBe('SPEC_READY');
+  });
+});
+
+describe('报告 schema 容忍 null 字段【S2w1 hotfix】', () => {
+  test('atd-report.json 显式 null 的 commits/blockReason 可正常解析（done）', () => {
+    const dir = path.join(tmpdir(), `atd-report-null-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, 'atd-report.json'),
+      JSON.stringify({ status: 'done', summary: 's', commits: null, blockReason: null }));
+    const r = readReport(dir);
+    expect(r.ok).toBe(true);
   });
 });
