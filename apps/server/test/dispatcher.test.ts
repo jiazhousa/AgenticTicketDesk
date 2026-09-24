@@ -78,7 +78,7 @@ describe('B1：全链——放行→worktree→spawn→报告 done→commits 落
     expect(done.workerId).toBe('fake');
 
     // commit 关联落库，sha 与 worktree 实际 HEAD 一致
-    const wt = ctx.worktree.pathFor(id, ctx.repoPath);
+    const wt = ctx.worktree.pathFor('atd', id, ctx.repoPath);
     const head = execFileSync('git', ['-C', wt, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     const detail = ctx.service.getTicketDetail(id);
     expect(detail.commits).toEqual([{ round: 1, sha: head }]);
@@ -169,7 +169,7 @@ describe('B3：卡点三裁决（BLOCK_MODE 参数化分轮）', () => {
     });
     const id = await dispatchTicket(ctx, 'fb');
     await waitStatus(ctx, id, ['BLOCKED']);
-    const wt = ctx.worktree.pathFor(id, ctx.repoPath);
+    const wt = ctx.worktree.pathFor('atd', id, ctx.repoPath);
     // r1（blocked 轮）的 marker 提交
     const r1Sha = execFileSync('git', ['-C', wt, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     const blocker = ctx.service.getTicketDetail(id).blocker!;
@@ -295,7 +295,7 @@ describe('pre-spawn 运行期失败 → DISPATCHED→CANCELLED + 留言', () => 
     ctx.service.submitSpec(t.id, '# spec');
     // 提前用普通文件占住 worktree 路径（allocate 复用分支→后续 git 操作失败）
     mkdirSync(path.join(ctx.config.dataDir, 'worktrees'), { recursive: true });
-    writeFileSync(ctx.worktree.pathFor(t.id, ctx.repoPath), 'not a dir');
+    writeFileSync(ctx.worktree.pathFor('atd', t.id, ctx.repoPath), 'not a dir');
     const res = await ctx.app.inject({
       method: 'POST',
       url: `/api/tickets/${t.id}/transition`,

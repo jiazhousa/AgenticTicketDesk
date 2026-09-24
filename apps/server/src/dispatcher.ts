@@ -94,7 +94,7 @@ export class Dispatcher {
       }
 
       // 步 1：建/复用 worktree
-      const wtPath = worktree.allocate(ticketId, repoPath);
+      const wtPath = worktree.allocate(ticket.workspaceId, ticketId, repoPath);
       // 步 2：清陈旧报告（防复用误读）→ 基线 → prompt 文件
       rmSync(path.join(wtPath, 'atd-report.json'), { force: true });
       const baseline = worktree.baseline(wtPath);

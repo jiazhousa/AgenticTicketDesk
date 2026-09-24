@@ -108,7 +108,7 @@ export function registerExecutionRoutes(
         ['修正 workspaces/*.yaml 恢复该仓声明后重试回收', '或确认该 worktree 目录已无保留价值后手动清理'],
       );
     }
-    runtime.worktree.reclaim(id, repoPath, keepBranch);
+    runtime.worktree.reclaim(ticket.workspaceId, id, repoPath, keepBranch);
     return { ok: true };
   });
 

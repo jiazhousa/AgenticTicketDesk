@@ -22,15 +22,20 @@ function git(cwd: string, args: string[]): string {
 export class WorktreeManager {
   constructor(private readonly dataDir: string) {}
 
-  /** 工单 worktree 路径（不校验存在性）；目录名取目标仓路径 basename */
-  pathFor(ticketId: number, repoPath: string): string {
-    const repoName = path.basename(path.resolve(repoPath));
-    return path.join(this.dataDir, 'worktrees', `${repoName}-t${ticketId}`);
+  /** dataDir 下 worktrees 根目录（自治领地边界：领地内孤儿挂载可自动回收） */
+  private get worktreesRoot(): string {
+    return path.join(this.dataDir, 'worktrees');
   }
 
-  /** 工单分支名 */
-  branchFor(ticketId: number): string {
-    return `atd/t${ticketId}`;
+  /** 工单 worktree 路径（不校验存在性）；目录名=目标仓 basename + workspaceId 维度消歧 */
+  pathFor(workspaceId: string, ticketId: number, repoPath: string): string {
+    const repoName = path.basename(path.resolve(repoPath));
+    return path.join(this.dataDir, 'worktrees', `${repoName}-${workspaceId}-t${ticketId}`);
+  }
+
+  /** 工单分支名（workspaceId 维度消歧：跨 workspace 同仓/历史残留天然不撞） */
+  branchFor(workspaceId: string, ticketId: number): string {
+    return `atd/${workspaceId}-t${ticketId}`;
   }
 
   /**
@@ -78,11 +83,12 @@ export class WorktreeManager {
 
   /**
    * 分配 worktree：已存在同名单则复用（改派/继续/重试场景，分支与半成品保留）；
-   * 分支已存在（回收时留了分支）则挂回；否则从基线新建分支。返回 worktree 路径。
+   * 分支已存在（回收时留了分支）则挂回——若分支被其他 worktree 挂载占用，
+   * dataDir 自治领地内的孤儿挂载（终态单/死实例遗留）自动回收，外部占用报错指引。返回 worktree 路径。
    */
-  allocate(ticketId: number, repoPath: string): string {
-    const wtPath = this.pathFor(ticketId, repoPath);
-    const branch = this.branchFor(ticketId);
+  allocate(workspaceId: string, ticketId: number, repoPath: string): string {
+    const wtPath = this.pathFor(workspaceId, ticketId, repoPath);
+    const branch = this.branchFor(workspaceId, ticketId);
     // 清理指向已消失目录的陈旧元数据（幂等）
     try {
       git(repoPath, ['worktree', 'prune']);
@@ -99,11 +105,33 @@ export class WorktreeManager {
       branchExists = false;
     }
     if (branchExists) {
+      const holder = this.branchHolder(repoPath, branch);
+      if (holder && !holder.startsWith(this.worktreesRoot)) {
+        throw new AppError(
+          'WORKTREE_SETUP',
+          `分支 ${branch} 被外部 worktree 占用：${holder}（非本 dataDir 管理范围，请手动处理）`,
+        );
+      }
+      if (holder) {
+        // 领地内孤儿挂载：终态单/死实例遗留（其内容已无归属），强制回收释放分支
+        git(repoPath, ['worktree', 'remove', '--force', holder]);
+      }
       git(repoPath, ['worktree', 'add', wtPath, branch]);
     } else {
       git(repoPath, ['worktree', 'add', '-b', branch, wtPath, this.defaultBranchHead(repoPath)]);
     }
     return wtPath;
+  }
+
+  /** 分支被哪个 worktree 挂载（checkout）；未被挂载返回 null。 */
+  private branchHolder(repoPath: string, branch: string): string | null {
+    const out = git(repoPath, ['worktree', 'list', '--porcelain']);
+    let current: string | null = null;
+    for (const line of out.split('\n')) {
+      if (line.startsWith('worktree ')) current = line.slice('worktree '.length).trim();
+      if (current && line === `branch refs/heads/${branch}`) return current;
+    }
+    return null;
   }
 
   /** worktree 当前 HEAD（每轮 spawn 前的基线） */
@@ -112,12 +140,12 @@ export class WorktreeManager {
   }
 
   /**
-   * 回收：keepBranch=true（默认）删 worktree 目录、留 atd/t{id} 分支与 commit；
+   * 回收：keepBranch=true（默认）删 worktree 目录、留 atd/{ws}-t{id} 分支与 commit；
    * false 时连分支删（commit 关联已落库不受影响）。目录有未提交内容时强制移除。
    */
-  reclaim(ticketId: number, repoPath: string, keepBranch: boolean): void {
-    const wtPath = this.pathFor(ticketId, repoPath);
-    const branch = this.branchFor(ticketId);
+  reclaim(workspaceId: string, ticketId: number, repoPath: string, keepBranch: boolean): void {
+    const wtPath = this.pathFor(workspaceId, ticketId, repoPath);
+    const branch = this.branchFor(workspaceId, ticketId);
     if (existsSync(wtPath)) {
       try {
         git(repoPath, ['worktree', 'remove', wtPath]);

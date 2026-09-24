@@ -42,7 +42,7 @@ function makeDualRepoContext(): { ctx: TestContext; repoB: string } {
 }
 
 describe('跨仓真跑：TASK repoRef=B【S2w1 验收场景 2】', () => {
-  test('worktree 目录落 {B仓basename}-t{N} 且 commit 在 B 仓分支；主仓无串仓', async () => {
+  test('worktree 目录落 {B仓basename}-{workspaceId}-t{N} 且 commit 在 B 仓分支；主仓无串仓', async () => {
     const { ctx, repoB } = makeDualRepoContext();
     const t = ctx.service.createTicket({ type: 'TASK', title: 'B 仓任务', repoRef: 'repo-b' });
     expect(t.workspaceId).toBe('atd');
@@ -59,21 +59,21 @@ describe('跨仓真跑：TASK repoRef=B【S2w1 验收场景 2】', () => {
     const done = await waitStatus(ctx, t.id, ['DONE']);
     expect(done.round).toBe(1);
 
-    // worktree 目录模板锚点：{dataDir}/worktrees/{repoName}-t{id}（repoName=B 仓 basename）
-    const expectedWt = path.join(ctx.config.dataDir, 'worktrees', `${path.basename(repoB)}-t${t.id}`);
+    // worktree 目录模板锚点：{dataDir}/worktrees/{repoName}-{ws}-t{id}（repoName=B 仓 basename）
+    const expectedWt = path.join(ctx.config.dataDir, 'worktrees', `${path.basename(repoB)}-atd-t${t.id}`);
     expect(existsSync(expectedWt)).toBe(true);
     expect(existsSync(path.join(expectedWt, 'atd-artifact.txt'))).toBe(true);
 
     // commit 在 B 仓分支；落库 sha 与分支 HEAD 一致
-    const head = git(repoB, ['rev-parse', '--verify', `refs/heads/atd/t${t.id}`]);
+    const head = git(repoB, ['rev-parse', '--verify', `refs/heads/atd/atd-t${t.id}`]);
     const detail = ctx.service.getTicketDetail(t.id);
     expect(detail.commits).toEqual([{ round: 1, sha: head }]);
 
     // 主仓（A）无该单分支——跨仓隔离由 worktree 目录与分支承载
-    expect(() => git(ctx.repoPath, ['rev-parse', '--verify', `refs/heads/atd/t${t.id}`])).toThrow();
+    expect(() => git(ctx.repoPath, ['rev-parse', '--verify', `refs/heads/atd/atd-t${t.id}`])).toThrow();
   });
 
-  test('缺省 repoRef=主仓：行为与 S2a 等价（worktree 落主仓名模板）', async () => {
+  test('缺省 repoRef=主仓：行为与 S2a 等价（worktree 落主仓名模板，含 workspaceId 维度）', async () => {
     const { ctx } = makeDualRepoContext();
     const t = ctx.service.createTicket({ type: 'TASK', title: '主仓任务' });
     expect(t.repoRef).toBe('atd');
@@ -85,9 +85,9 @@ describe('跨仓真跑：TASK repoRef=B【S2w1 验收场景 2】', () => {
     });
     expect(res.statusCode).toBe(200);
     await waitStatus(ctx, t.id, ['DONE']);
-    const expectedWt = path.join(ctx.config.dataDir, 'worktrees', `${path.basename(ctx.repoPath)}-t${t.id}`);
+    const expectedWt = path.join(ctx.config.dataDir, 'worktrees', `${path.basename(ctx.repoPath)}-atd-t${t.id}`);
     expect(existsSync(expectedWt)).toBe(true);
-    git(ctx.repoPath, ['rev-parse', '--verify', `refs/heads/atd/t${t.id}`]);
+    git(ctx.repoPath, ['rev-parse', '--verify', `refs/heads/atd/atd-t${t.id}`]);
   });
 });
 
@@ -123,13 +123,13 @@ describe('跨仓编排链：Task1@A DONE → Task2@B 自动放行【S2w1 验收�
     expect(d2.transitions.some((x) => x.note === '编排链依赖满足，自动放行')).toBe(true);
 
     // 两 worktree 独立落各自仓（目录模板互不串仓）
-    const wt1 = path.join(ctx.config.dataDir, 'worktrees', `${path.basename(ctx.repoPath)}-t${t1.id}`);
-    const wt2 = path.join(ctx.config.dataDir, 'worktrees', `${path.basename(repoB)}-t${t2.id}`);
+    const wt1 = path.join(ctx.config.dataDir, 'worktrees', `${path.basename(ctx.repoPath)}-atd-t${t1.id}`);
+    const wt2 = path.join(ctx.config.dataDir, 'worktrees', `${path.basename(repoB)}-atd-t${t2.id}`);
     expect(existsSync(wt1)).toBe(true);
     expect(existsSync(wt2)).toBe(true);
-    git(ctx.repoPath, ['rev-parse', '--verify', `refs/heads/atd/t${t1.id}`]);
-    git(repoB, ['rev-parse', '--verify', `refs/heads/atd/t${t2.id}`]);
-    expect(() => git(repoB, ['rev-parse', '--verify', `refs/heads/atd/t${t1.id}`])).toThrow();
-    expect(() => git(ctx.repoPath, ['rev-parse', '--verify', `refs/heads/atd/t${t2.id}`])).toThrow();
+    git(ctx.repoPath, ['rev-parse', '--verify', `refs/heads/atd/atd-t${t1.id}`]);
+    git(repoB, ['rev-parse', '--verify', `refs/heads/atd/atd-t${t2.id}`]);
+    expect(() => git(repoB, ['rev-parse', '--verify', `refs/heads/atd/atd-t${t1.id}`])).toThrow();
+    expect(() => git(ctx.repoPath, ['rev-parse', '--verify', `refs/heads/atd/atd-t${t2.id}`])).toThrow();
   });
 });
