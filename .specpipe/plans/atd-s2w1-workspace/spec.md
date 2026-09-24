@@ -42,7 +42,7 @@ ATD 终态定位是**多项目迭代面板**——通过 ATD 对任意项目群�
 ### FR-4 TASK 目标仓 repoRef
 - 建单 API（仅 TASK）新增可选 `repoRef`：必须 ∈ 所属 workspace 的 repos id，缺省=主仓 id；非法值或非 TASK 单传入 → 422 指明可选集
 - **放行三件套扩展为四件套**：workerId 必填 → ∈Registry → worktree 可建 → **repoRef 仓存在且 ∈workspace**（建单时已校验，放行时复校防 yaml 变更后漂移；复校失败的在途单 → 422 指明 repoRef 已失效，人工修正 yaml 后重试或裁决终止）
-- worker 执行：worktree 建在 repoRef 指向的仓；worktree 路径 `{dataDir}/worktrees/{repoName}-t{id}`（repoName 取自目标仓路径 basename——**此模板为验收锚点**：跨仓隔离以目录名可断言；分支 `atd/t{id}`、日志/prompt `t{id}.r{round}.*` 命名不变——日志按单号唯一性落盘（非按仓物理分区），跨仓隔离由 worktree 目录与分支承载）
+- worker 执行：worktree 建在 repoRef 指向的仓；worktree 路径 `{dataDir}/worktrees/{repoName}-{workspaceId}-t{id}`（repoName 取自目标仓路径 basename——**此模板为验收锚点**：跨仓/跨 workspace 隔离以目录名可断言）；分支 `atd/{workspaceId}-t{id}`（workspaceId 维度消歧，历史残留与跨 workspace 同仓天然不撞；领地内孤儿挂载自动回收、外部占用报错指引）；日志/prompt `t{id}.r{round}.*` 命名不变——按单号唯一性落盘，隔离由 worktree 目录与分支承载
 - **AGENTS.md 天然加载**：目标仓的 AGENTS.md 随 worktree checkout 存在，opencode 项目指令机制自动加载（spawn cwd=worktree）——S2w1 零开发；共享 server 模式下的显式注入是 S2b1 范围（见边界）
 - 约束：**同一 Story 的子 Task 可跨仓**（同 workspace 内），依赖 DAG 与编排链自动放行照常（与仓无关）
 
