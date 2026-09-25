@@ -66,11 +66,21 @@ export type TicketDetailResponse = TicketDetail & {
   execution: { startedAt: number } | null;
 };
 
-/** 统一事件流（@atd/worker-core 同构镜像，块 B 手抄参照） */
+/** 统一事件流（@atd/worker-core 同构镜像，块 B 手抄参照）——S2b1 扩展 reasoning/permission_request 两型 */
 export type UnifiedEvent =
   | { type: 'turn-start' | 'turn-end' | 'text-start' | 'text-end'; timestamp?: number; reason?: string }
   | { type: 'text-delta'; timestamp?: number; text: string }
+  | { type: 'reasoning'; timestamp?: number; text: string; phase: 'started' | 'ended' }
   | { type: 'tool-call' | 'tool-result'; timestamp?: number; tool: string; errored?: boolean }
+  | {
+      type: 'permission_request';
+      timestamp?: number;
+      requestID: string;
+      action: string;
+      resources: string[];
+      status: 'pending' | 'resolved';
+      decision?: string;
+    }
   | { type: 'finish'; timestamp?: number; success: boolean };
 
 /** GET /api/tickets/:id/logs?round=&tail= 响应（tail 缺省 50、上限 500） */
@@ -86,3 +96,21 @@ export type ResolveTicketBody = {
   reassignWorkerId?: string;
 };
 export type ResolveTicketResponse = { ticket: Ticket };
+
+// ---------- humanthink 契约镜像（S2b1；形态源头=humanthink 模块，块 2 手抄参照） ----------
+
+import type { SessionEventInfo, SessionInfo, PermissionRequestInfo } from '../humanthink/routes.js';
+import type { HumanThinkEvent, HumanThinkMirrorType, SseFrame } from '../humanthink/events.js';
+export type { SessionInfo, SessionEventInfo, PermissionRequestInfo, HumanThinkEvent, HumanThinkMirrorType, SseFrame };
+
+/** POST /api/humanthink/sessions 请求体与响应 */
+export type CreateHumanThinkSessionBody = { workerId: string; workspaceId: string; title?: string };
+export type CreateHumanThinkSessionResponse = { session: SessionInfo };
+export type HumanThinkSessionListResponse = { items: SessionInfo[] };
+/** SSE 帧：durable/镜像事件带本地 seq，delta 帧无 seq（断线以最后 durable seq 为 after 重连） */
+export type HumanThinkEventFrame = SseFrame;
+export type HumanThinkSessionDetailResponse = { session: SessionInfo; events: SessionEventInfo[] };
+export type HumanThinkPromptResponse = { admitted: true };
+export type HumanThinkOkResponse = { ok: true };
+export type HumanThinkPermissionListResponse = { items: PermissionRequestInfo[] };
+export type HumanThinkReplyBody = { decision: 'once' | 'reject'; message?: string };

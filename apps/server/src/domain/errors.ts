@@ -19,7 +19,10 @@ export type ErrorCode =
   | 'REPO_REF_INVALID'
   | 'REPO_REF_DRIFTED'
   | 'CROSS_WORKSPACE'
-  | 'FILE_SET_CONFLICT';
+  | 'FILE_SET_CONFLICT'
+  | 'WORKER_UNAVAILABLE'
+  | 'SESSION_NOT_FOUND'
+  | 'SESSION_TERMINATED';
 
 export const ERROR_STATUS: Record<ErrorCode, number> = {
   NOT_FOUND: 404,
@@ -42,6 +45,11 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   REPO_REF_DRIFTED: 422,
   CROSS_WORKSPACE: 422,
   FILE_SET_CONFLICT: 422,
+  /** humanthink serve 不可用（degraded）——工单功能不受影响 */
+  WORKER_UNAVAILABLE: 503,
+  SESSION_NOT_FOUND: 404,
+  /** 已删（软删除）会话的操作性端点统一拒绝 */
+  SESSION_TERMINATED: 422,
 };
 
 /** 领域错误：details 为人类可读明细数组（如未完成依赖单清单） */

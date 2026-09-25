@@ -1,9 +1,12 @@
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 
+/** interactive 模式 serve 命令缺省模板（MVP 单 serve：opencode 形态） */
+export const DEFAULT_SERVE_COMMAND = 'opencode serve --port {port}';
+
 /**
  * WorkerProfile schema（workers/*.yaml 的唯一事实源）。
- * S2a 仅实现 spawn-cli 协议的 task 模式；interactive 随后续版本接入。
+ * task 模式=spawn-cli 单轮执行；interactive 模式=常驻 serve 长会话（S2b1）。
  */
 export const workerProfileSchema = z.object({
   /** 唯一标识（小写字母/数字/连字符） */
@@ -16,6 +19,19 @@ export const workerProfileSchema = z.object({
   command: z.string().min(1),
   /** 单轮执行超时（分钟），超时杀进程树 */
   timeoutMin: z.number().int().positive().optional(),
+  /**
+   * interactive 模式声明段（capabilities 含 interactive 时生效）。
+   * serveCommand 为 serve 子进程命令模板，{port} 由编排层整体替换（不经 shell）；
+   * yaml 裸键（interactive:）解析为 null，视同声明段存在但全缺省。
+   */
+  interactive: z
+    .preprocess(
+      (v) => (v === null ? {} : v),
+      z.object({
+        serveCommand: z.string().min(1).optional(),
+      }),
+    )
+    .optional(),
 });
 
 export type WorkerProfile = z.infer<typeof workerProfileSchema>;
@@ -68,5 +84,32 @@ export function validateProfile(raw: string, source: string): WorkerProfile {
       `profile 命令模板含推送类 token（push/remote），拒绝注册（${source}）：${profile.command}`,
     );
   }
+  const serveCommand = profile.interactive?.serveCommand ?? DEFAULT_SERVE_COMMAND;
+  if (!serveCommand.includes('{port}')) {
+    throw new Error(`profile interactive.serveCommand 必须含 {port} 占位符（${source}）：${serveCommand}`);
+  }
   return profile;
+}
+
+/**
+ * interactive 能力可用性判定：MVP 单 serve 仅支持 opencode serve 形态——
+ * 声明了 interactive 但 serveCommand 非 opencode serve 形态的 worker 标记不可用
+ * （聊天框建会话下拉不列出）。task 模式不受影响。
+ */
+export function isInteractiveServeCompatible(profile: WorkerProfile): boolean {
+  if (!profile.capabilities.includes('interactive')) return false;
+  const tokens = (profile.interactive?.serveCommand ?? DEFAULT_SERVE_COMMAND).trim().split(/\s+/);
+  return tokens[0] === 'opencode' && tokens[1] === 'serve';
+}
+
+/**
+ * 渲染 serve 命令为参数数组：按空白拆 token 后整体替换 {port}——
+ * 端口值不二次拆分（参数数组语义，不经 shell，无注入面）。
+ */
+export function renderServeCommand(profile: WorkerProfile, port: number): string[] {
+  const template = profile.interactive?.serveCommand ?? DEFAULT_SERVE_COMMAND;
+  return template
+    .trim()
+    .split(/\s+/)
+    .map((token) => token.replaceAll('{port}', String(port)));
 }

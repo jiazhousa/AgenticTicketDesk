@@ -130,3 +130,50 @@ export const ticketFiles = sqliteTable(
   },
   (t) => [uniqueIndex('uq_ticket_file').on(t.ticketId, t.round, t.path)],
 );
+
+/**
+ * humanthink 会话（S2b1）：id 直接采用 serve 侧 sessionID（ses_*，serve 数据目录持久、
+ * 重启不变，ATD 透传）。软删除=deletedAt 置位（列表排除、历史可查、操作端点拒绝）。
+ */
+export const humanthinkSessions = sqliteTable('humanthink_sessions', {
+  /** serve sessionID（ses_ 前缀） */
+  id: text('id').primaryKey(),
+  workerId: text('worker_id').notNull(),
+  workspaceId: text('workspace_id').notNull(),
+  /** 会话工作目录（workspace 主仓绝对路径，建会话时固化） */
+  directory: text('directory').notNull(),
+  title: text('title').notNull(),
+  createdAt: integer('created_at').notNull(),
+  lastActiveAt: integer('last_active_at').notNull(),
+  /** 软删除时刻（NULL=活跃） */
+  deletedAt: integer('deleted_at'),
+});
+
+/**
+ * humanthink 事件镜像（S2b1）：serve 全局流 durable 子集 + ATD 自有权限行 + message 对账行。
+ * 幂等键=(session_id, serve_seq)——serve_seq 为 serve 事件信封 durable.seq；
+ * 对账/权限等无信封行 serve_seq=NULL（SQLite UNIQUE 对 NULL 不约束，幂等走应用层先查后插）。
+ * seq 为本地每会话递增展示序（SSE 回放游标）。
+ */
+export const humanthinkEvents = sqliteTable(
+  'humanthink_events',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    sessionId: text('session_id')
+      .notNull()
+      .references(() => humanthinkSessions.id),
+    /** serve 事件信封 durable.seq（镜像行非空；无信封行为 NULL） */
+    serveSeq: integer('serve_seq'),
+    /** 本地每会话递增展示序（对外 SSE after 游标） */
+    seq: integer('seq').notNull(),
+    /** 镜像 type 值域冻结于 routes/types.ts（HumanThinkMirrorType） */
+    type: text('type').notNull(),
+    /** 事件载荷 JSON（HumanThinkEvent 序列化） */
+    payload: text('payload').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [
+    uniqueIndex('uq_ht_event_serve_seq').on(t.sessionId, t.serveSeq),
+    uniqueIndex('uq_ht_event_seq').on(t.sessionId, t.seq),
+  ],
+);

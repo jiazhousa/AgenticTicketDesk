@@ -72,6 +72,8 @@ export function createTestContext(
     retryBackoffSec?: number;
     tickIntervalMs?: number;
     now?: () => number;
+    /** humanthink 旁路位（D8）：默认 false——既有测试零 serve 进程；专属测试传 true+seam */
+    humanthink?: { enabled: true; fetchImpl?: typeof fetch; spawnImpl?: never; now?: () => number };
   } = {},
 ): TestContext {
   const db = createDatabase(':memory:');
@@ -88,6 +90,7 @@ export function createTestContext(
     maxConcurrentPerRepo: opts.maxConcurrentPerRepo ?? 2,
     maxRetries: opts.maxRetries ?? 3,
     retryBackoffSec: opts.retryBackoffSec ?? 60,
+    humanthinkPort: 4900,
   };
   const { app, runtime, worktree } = buildServer(db, {
     config,
@@ -97,6 +100,7 @@ export function createTestContext(
     worktreeGuard: 'skip',
     tickIntervalMs: opts.tickIntervalMs,
     now: opts.now,
+    humanthink: opts.humanthink ?? { enabled: false },
   });
   return {
     db,
@@ -160,6 +164,8 @@ export function createRealContext(
     retryBackoffSec?: number;
     tickIntervalMs?: number;
     now?: () => number;
+    /** humanthink 旁路位（D8）：默认 false——真跑上下文零 serve 进程 */
+    humanthink?: { enabled?: boolean; fetchImpl?: typeof fetch };
   } = {},
 ): TestContext {
   const db = createDatabase(':memory:');
@@ -189,6 +195,7 @@ export function createRealContext(
       maxConcurrentPerRepo: opts.maxConcurrentPerRepo ?? 2,
       maxRetries: opts.maxRetries ?? 3,
       retryBackoffSec: opts.retryBackoffSec ?? 60,
+      humanthinkPort: 4900,
     },
     registry,
     workspaces,
@@ -196,6 +203,7 @@ export function createRealContext(
     timeoutOverrideMs: opts.timeoutOverrideMs,
     tickIntervalMs: opts.tickIntervalMs,
     now: opts.now,
+    humanthink: opts.humanthink ?? { enabled: false },
   });
   return {
     db,

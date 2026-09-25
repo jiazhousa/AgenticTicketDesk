@@ -36,6 +36,13 @@
       "when": 1790338869719,
       "tag": "0004_s3_parallel",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1790351847166,
+      "tag": "0005_s2b1_humanthink",
+      "breakpoints": true
     }
   ]
 }

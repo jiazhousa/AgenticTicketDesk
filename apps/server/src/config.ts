@@ -29,6 +29,8 @@ const configSchema = z.object({
   maxRetries: z.number().int().min(0).default(3),
   /** RETRY_WAIT 退避基数（秒）：第 n 次重试等待 retryBackoffSec×2^(n-1)，封顶 240 */
   retryBackoffSec: z.number().int().positive().default(60),
+  /** humanthink 常驻 serve 起始端口（占用时向后递补）；S2b1 */
+  humanthinkPort: z.number().int().positive().default(4900),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
