@@ -4,7 +4,7 @@
 - **上游 spec**：`.specpipe/plans/atd-s2b1-humanthink/spec.md`（v7 业务语言版，SPEC_APPROVED）
 - **契约唯一事实源**：`.specpipe/plans/atd-s2b1-humanthink/probe-report.md`（探针 8 项漂移 + 补录 0 号全文/序号信封——**与源码快照/既往调研冲突时以探针报告为准**）
 - **基线**：main@fc589c8
-- **修订记录**：r1 REJECT 9 → **v2**（本版）：块文件集补齐（App.tsx 路由/errors.ts/helpers.ts+旁路 seam/scripts）/镜像主源实证落定（text.ended 全文+durable.seq）/SSE 帧 seq 语义/已删三分语义/permission status 字段/worker-core 测试落点 test/。serveCommand 边界/config-gen 口径枚举/404 兜底
+- **修订记录**：r1 REJECT 9 → v2（块文件集补齐/镜像主源实证）；r2 REJECT 87 → **v2.1（本版）**：已删详情内嵌只读历史/对账应用层幂等/durable.seq 缺失跳过落库/config-gen 读写边界/断流接受面记档
 
 ## 技术方案
 
@@ -54,7 +54,7 @@
 |---|---|
 | `apps/web/src/api/humanthink.ts`（新） | 9 端点 client + EventSource SSE 封装（同源） |
 | `apps/web/src/api/types.ts` | humanthink 面类型手抄（对齐 routes/types.ts 镜像） |
-| `apps/web/src/pages/HumanThinkPage.tsx`（新） | 会话列表（workspace 过滤+搜索）+ 聊天窗（流式/reasoning 折叠/工具卡片/审批卡 once-reject/中断）+ 建会话弹窗（capabilities 含 interactive 且可用才可选） |
+| `apps/web/src/pages/HumanThinkPage.tsx`（新） | 会话列表（workspace 过滤+搜索；**含「已删除」查看入口——列出 deletedAt 非空会话，点击进只读详情（API 详情内嵌历史），无操作按钮**）+ 聊天窗（流式/reasoning 折叠/工具卡片/审批卡 once-reject/中断）+ 建会话弹窗（capabilities 含 interactive 且可用才可选） |
 | `apps/web/src/components/chat/`（新，4 组件） | ChatMessage/ReasoningBlock/ToolCard/ApprovalCard |
 | `apps/web/src/App.tsx` | **路由挂载 `/humanthink`（唯一挂载点，约 :19-25）** |
 | `apps/web/src/components/AppLayout.tsx` | 导航入口「聊天」 |

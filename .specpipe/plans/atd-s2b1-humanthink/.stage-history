@@ -16,3 +16,5 @@
 {"ts":"2026-09-25T23:25:28+08:00","topic":"atd-s2b1-humanthink","from":"IMPL_DRAFT","to":"IMPL_REVIEWING","actor":"调度者"}
 {"ts":"2026-09-25T23:29:43+08:00","topic":"atd-s2b1-humanthink","from":"IMPL_REVIEWING","to":"IMPL_DRAFT","actor":"审查者"}
 {"ts":"2026-09-25T23:30:24+08:00","topic":"atd-s2b1-humanthink","from":"IMPL_DRAFT","to":"IMPL_REVIEWING","actor":"调度者"}
+{"ts":"2026-09-25T23:31:44+08:00","topic":"atd-s2b1-humanthink","from":"IMPL_REVIEWING","to":"IMPL_APPROVED","actor":"审查者"}
+{"ts":"2026-09-25T23:32:01+08:00","topic":"atd-s2b1-humanthink","from":"IMPL_APPROVED","to":"WORKING","actor":"调度者"}
