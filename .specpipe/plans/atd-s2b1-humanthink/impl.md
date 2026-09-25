@@ -13,9 +13,9 @@
 **核心链路**（探针实证口径）：
 
 1. **serve 托管**：ATD 启动 → 生成 `{dataDir}/opencode-config/opencode.json` → spawn `opencode serve --port {humanthinkPort}`（env：`OPENCODE_SERVER_PASSWORD`=crypto random 仅内存+子进程、`OPENCODE_CONFIG_DIR` 指向生成目录）；健康探测=authed `GET /api/agent` 看 HTTP 状态（5s；空列表正常）；崩溃重启（退避 3 次转 degraded：humanthink 端点 503，工单功能不受影响）；清理挂 Fastify `onClose`；**app.ts 装配接受 `humanthink?: {enabled: boolean}`（缺省 true；测试经 helpers 传 false 旁路 spawn/订阅——既有 server 测试零 serve 进程）**
-2. **配置生成**（config-gen，纯函数）：复制键白名单=`{model, providers}`（providers 原样含凭据——dataDir 本地文件不入仓，MUST-6 边界内）；**禁入键=V1 迁移触发三键（单数 `agent`/`provider`/`permission`）及全部 V1 键**（用户全局为 V1 键形时提取 model/provider 等价语义，绝不原样复制触发键）；兼容 `opencode.json`/`opencode.jsonc`（存在者优先）；`agents.atd-ht-{workspaceId}`.permissions 五规则（探针定案）：①`{action:"*",resource:"*",effect:"ask"}`（强制首条，生成器硬编码——本二进制无匹配默认=allow）②`{action:"external_directory",resource:"/**",effect:"deny"}` ③`{action:"read",resource:"*",effect:"allow"}` ④⑤per readable 仓：`external_directory` 与 `read` 各一条 `<绝对路径>/*` allow（形态 Builder 真跑锁定）；启动幂等重写；serve 生命周期内 workspace 集不变
+2. **配置生成**（config-gen，纯函数）：**读取源=固定用户全局位（`~/.config/opencode` 的 `opencode.json`/`opencode.jsonc`，存在者优先）；写目标=仅 `{dataDir}/opencode-config/opencode.json`（绝不写其他任何路径）**；复制键白名单=`{model, providers}`（providers 原样含凭据——dataDir 本地文件不入仓，MUST-6 边界内；用户全局缺失时仅生成 agents 段，模型缺失风险由冒烟暴露）；**禁入键=V1 迁移触发三键（单数 `agent`/`provider`/`permission`）及全部 V1 键**（用户全局为 V1 键形时提取 model/provider 等价语义，绝不原样复制触发键）；`agents.atd-ht-{workspaceId}`.permissions 五规则（探针定案）：①`{action:"*",resource:"*",effect:"ask"}`（强制首条，生成器硬编码——本二进制无匹配默认=allow）②`{action:"external_directory",resource:"/**",effect:"deny"}` ③`{action:"read",resource:"*",effect:"allow"}` ④⑤per readable 仓：`external_directory` 与 `read` 各一条 `<绝对路径>/*` allow（形态 Builder 真跑锁定）；启动幂等重写；serve 生命周期内 workspace 集不变
 3. **会话面**：创建=v2 `POST /api/session`（`{agent:"atd-ht-{ws}", location:{directory}, title?}`+`x-opencode-directory` 头）；prompt=v2 `POST /api/session/:id/prompt` `{text}`；interrupt=v2 `POST /api/session/:id/interrupt`（存在性 Builder 核 openapi，无则 instance 面 abort）；删除=instance `DELETE /session/:id`；**会话持久于共享数据目录（serve 重启 sessionID 不变）；ATD 透传遇 serve 404 → 统一 SESSION_NOT_FOUND 兜底**
-4. **事件双通道**：live=全局 `GET /api/event` 一条 SSE 共享订阅，按 sessionID 分发（`session.text.delta`/`session.reasoning.delta` 仅转发不落库）；**镜像=流内 durable 子集落 `humanthink_events`**：`text.ended`（**全文主源，`data.text`**）/`reasoning.{started,ended}`（全文载荷以实测为准，缺则仅标记）/`tool.{called,success,failed,progress}`/`step.{started,ended}`/`permission.{asked,rejected}`——**幂等键=(session_id, serve_seq)**（serve 事件信封 `durable.seq` 原生序号），对外展示 seq=本地每会话递增；**恢复=重连全局流 + 活跃会话 `GET /api/session/:id/message`（+`/message/:messageID`）对账**——**文本以 message 端点为权威兜底（与验收「不丢话」一致），live 流为主源**
+4. **事件双通道**：live=全局 `GET /api/event` 一条 SSE 共享订阅，按 sessionID 分发（`session.text.delta`/`session.reasoning.delta` 仅转发不落库）；**镜像=流内 durable 子集落 `humanthink_events`**：`text.ended`（**全文主源，`data.text`**）/`reasoning.{started,ended}`（全文载荷以实测为准，缺则仅标记）/`tool.{called,success,failed,progress}`/`step.{started,ended}`/`permission.{asked,rejected}`（镜像 type 值域即此清单+ATD 自有 permission_request/permission_resolved 两型，成表冻结于 routes/types.ts 镜像）——**幂等键=(session_id, serve_seq)**（事件信封 `durable.seq`；**信封缺失的事件跳过落库仅转发 live+warn 日志，不做退化双键**）；对外展示 seq=本地每会话递增；**恢复=重连全局流 + 活跃会话 `GET /api/session/:id/message`（+`/message/:messageID`）对账**——对账行 serve_seq=NULL（唯一索引对 NULL 不约束），**应用层幂等=(session_id, payload.messageId) 先查后插（单进程串行无竞态）**；**文本以 message 端点为权威兜底（与验收「不丢话」一致；「不丢话」指对话文本——断流窗口的 reasoning/tool 历史缺失为记档接受面）**
 5. **审批中转**：live `permission.asked` 即推 web + 活跃会话 2s 轮询会话级 `GET /api/session/:id/permission`；reply=`POST .../permission/:requestID/reply` `{decision:"once"|"reject", message?}`（**always 不开放**——saved 按 projectID 与用户自用共享，防静默授权扩散）；ATD 写镜像自有行 permission_request/permission_resolved
 6. **UnifiedEvent 扩展**（worker-core）：+`reasoning`（{text, phase}）+`permission_request`（{requestID, action, resources, **status: 'pending'|'resolved'**}——审批历史回溯并入同型）；humanthink 模块做 `session.*`→UnifiedEvent 映射；task 映射器零改动
 7. **HTTP**：不引 SDK，原生 fetch+手写 SSE 解析（零新依赖）
@@ -41,7 +41,7 @@
 | `packages/worker-core/src/profile.ts` + `src/events.ts`（或同域文件） | profile +`interactive` 段（serveCommand 模板 `{port}` 缺省 `opencode serve --port {port}`；必含 {port}+凭据扫描复用；非 opencode 协议标不可用）；UnifiedEvent +两型 |
 | `packages/worker-core/test/`（**测试必须落 test/ 目录**——vitest include=test/**，落 src/ 静默不跑） | profile interactive 校验/两型映射用例 |
 | `workers/opencode.yaml` | capabilities 数组加 `'interactive'` 值（schema 枚举已含，零 schema 枚举改动）；interactive 段声明 |
-| `apps/server/test/helpers.ts` | AppConfig 两处内联字面量补 `humanthinkPort`；+humanthink 旁路选项（默认 enabled:false 走 app 装配旁路——既有 14 测试文件零 serve 进程；humanthink 专属测试显式启用+注入假 serve） |
+| `apps/server/test/helpers.ts` | AppConfig 两处内联字面量补 `humanthinkPort`；+humanthink 旁路选项（默认 enabled:false 走 app 装配旁路——既有 13 测试文件零 serve 进程；humanthink 专属测试显式启用+注入假 serve） |
 | `apps/server/test/humanthink/*.test.ts`（新） | config-gen（白名单/禁入键/jsonc/V1 提取/幂等/规则序列硬编码）/事件映射与镜像幂等（durable.seq 去重）/对账（message 权威兜底幂等）/审批 once-reject/会话面 404 兜底/serve-manager 生命周期（假 spawn/fetch）/SSE after 回放 |
 | `apps/server/test/api-s2b1.test.ts`（新） | 9 端点契约+四错误码+degraded |
 | `scripts/smoke-humanthink.sh`（新，可选手动） | 真 serve 冒烟（对齐探针步骤；交付验收用，不进 fence） |
@@ -65,7 +65,7 @@
 
 - `POST /api/humanthink/sessions` `{workerId, workspaceId, title?}` → `{session}`（session=id/workerId/workspaceId/directory/title/createdAt/deletedAt:null）
 - `GET /api/humanthink/sessions?workspaceId=&q=` → `{items}`（排除 deleted；q=title+文本 payload LIKE）
-- **已删会话三分语义**：列表排除；`GET .../:id` 返回带 deletedAt（历史可查）；prompt/interrupt/delete/reply/events 一律 422 `SESSION_TERMINATED`
+- **已删会话三分语义**：列表排除；`GET .../:id` → `{session（含 deletedAt）, events}`——**详情内嵌只读历史事件（镜像回放，规则 5「历史可查」的唯一读通道）**；prompt/interrupt/delete/reply/SSE 一律 422 `SESSION_TERMINATED`
 - `GET .../:id/events`（SSE）：`?after=<本地 seq>` 先回放镜像再续 live；帧=`data: {seq?, event}`——durable 事件带 seq、delta 帧无 seq（断线重连以最后 durable seq 为 after；delta 设计不重放，UI 以镜像全文对齐）
 - `POST .../:id/prompt` `{text}` → `{admitted:true}`；`POST .../:id/interrupt` → `{ok:true}`；`DELETE .../:id` → `{ok:true}`
 - `GET .../:id/permission/requests` → `{items:[{requestID, action, resources}]}`；`POST .../permission/:requestID/reply` `{decision:"once"|"reject", message?}` → `{ok:true}`
@@ -94,5 +94,5 @@
 | message 端点详情形状未探明 | 对账 Builder 实测定形；文本权威兜底语义不变（验收「不丢话」硬约束，无「接受缺失」fallback） |
 | 全局流断流窗口 | delta 可丢+durable 幂等+message 对账三重保障；有界缓冲+after 重连 |
 | readable allow/interrupt 存在性 | 真跑锁定；同族 fallback（规则微调/instance abort） |
-| 事件信封 durable.seq 的稳定性（版本演进） | 幂等键失效时退化 (session_id, 本地 seq) 双写兼容（serve_seq 可空+唯一索引局部） |
+| 事件信封 durable.seq 缺失（版本演进） | 跳过落库仅转发 live+warn（技术方案 4 定案，无退化双键）；冒烟脚本覆盖信封存在性断言 |
 | serve 与自用服务资源竞争 | 独立端口/密码/进程组 |
