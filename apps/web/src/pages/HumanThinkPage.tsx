@@ -451,7 +451,7 @@ export default function HumanThinkPage() {
       await promptHtSession(session.id, text);
     } catch (e) {
       if (e instanceof ApiError && e.code === 'SESSION_TERMINATED') void loadDetail(session.id);
-      // 其余失败 toast 已弹；回显保留由用户重发
+      else setInput(text); // 发送失败还原输入，避免用户重打
     } finally {
       setSending(false);
     }

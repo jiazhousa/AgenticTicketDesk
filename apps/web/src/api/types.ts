@@ -357,7 +357,7 @@ export interface HumanThinkPermissionReplyRequest {
 /** prompt 响应（消息已受理，回复经事件流返回） */
 export interface HumanThinkPromptResponse {
   admitted: true;
-  /** serve 侧用户消息 id（SSE 镜像行按此幂等；回显去重依据） */
+  /** serve 侧用户消息 id（SSE 镜像行按此幂等；渲染去重依据） */
   messageId: string;
 }
 
@@ -408,7 +408,7 @@ export interface HumanThinkEvent {
   text?: string;
   /** message 行角色（user=用户气泡，assistant=对账兜底渲染） */
   role?: 'user' | 'assistant';
-  /** message 行：serve 侧消息 id（回显去重依据） */
+  /** message 行：serve 侧消息 id（渲染去重依据） */
   messageId?: string;
   /** tool.*：工具名 */
   tool?: string;
