@@ -5,6 +5,7 @@ import path from 'node:path';
 import { vi, describe, expect, test } from 'vitest';
 import type { Status } from '../src/domain/status.js';
 import type { Ticket } from '../src/domain/ticket-service.js';
+import { ticketFiles } from '../src/db/schema.js';
 import { FIXTURES_DIR, createRealContext, type TestContext } from './helpers.js';
 import { readReport } from '../src/report.js';
 
@@ -19,10 +20,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** 建单+提交 spec+HTTP 放行（autoDispatch 已开），返回工单 id */
-async function dispatchTicket(ctx: TestContext, workerId: string): Promise<number> {
-  const t = ctx.service.createTicket({ type: 'TASK', title: '测试任务' });
-  ctx.service.submitSpec(t.id, '# spec\n\n写文件并提交');
+/** 建单+提交 spec+HTTP 放行（autoDispatch 已开；闸门满时响应为排队单），返回工单 id */
+async function dispatchTicket(
+  ctx: TestContext,
+  workerId: string,
+  opts: { title?: string; plannedFiles?: string[] } = {},
+): Promise<number> {
+  const t = ctx.service.createTicket({ type: 'TASK', title: opts.title ?? '测试任务' });
+  ctx.service.submitSpec(t.id, '# spec\n\n写文件并提交', opts.plannedFiles);
   const res = await ctx.app.inject({
     method: 'POST',
     url: `/api/tickets/${t.id}/transition`,
@@ -30,6 +35,24 @@ async function dispatchTicket(ctx: TestContext, workerId: string): Promise<numbe
   });
   expect(res.statusCode).toBe(200);
   return t.id;
+}
+
+/** 轮询直至谓词命中（超时失败并报告当前快照） */
+async function waitTicket(
+  ctx: TestContext,
+  id: number,
+  pred: (t: Ticket) => boolean,
+  what: string,
+  timeoutMs = 20_000,
+): Promise<Ticket> {
+  const deadline = Date.now() + timeoutMs;
+  let last = ctx.service.getTicket(id);
+  while (Date.now() < deadline) {
+    last = ctx.service.getTicket(id);
+    if (pred(last)) return last;
+    await sleep(150);
+  }
+  throw new Error(`等待 ${what} 超时（当前 status=${last.status} retryCount=${last.retryCount}，工单 #${id}）`);
 }
 
 /** 轮询工单状态直至命中（超时失败并报告当前状态） */
@@ -259,30 +282,61 @@ describe('B5：超时——杀进程组（子+孙进程均 ESRCH）', () => {
   });
 });
 
-describe('B6：报告缺失——L2 重试（round=2 可见）→ 仍缺 → L3 BLOCKER（留言含 raw 路径）', () => {
-  test('fake-noreport 全链', async () => {
+describe('B6：报告缺失——RETRY_WAIT 自愈（60/120/240 退避）→ 耗尽当次升级 l3【S3 语义更新】', () => {
+  test('fake-noreport：入 BLOCKED(agent) 带 retry_at；注入时钟断言三档退避；第 4 次进入即升级', async () => {
+    const T0 = 1_700_000_000_000;
+    let clock = T0;
     const ctx = createRealContext({
       autoDispatch: true,
-      retryOnReportMiss: 1,
+      maxRetries: 3,
+      retryBackoffSec: 60,
+      tickIntervalMs: 25,
+      now: () => clock,
       profiles: [{ id: 'fn', command: fixtureCmd('fake-noreport.mjs') }],
     });
     const id = await dispatchTicket(ctx, 'fn');
-    const blocked = await waitStatus(ctx, id, ['BLOCKED'], 25_000);
-    // 重试一轮后升级：round=2 可见
-    expect(blocked.round).toBe(2);
-    expect(blocked.pendingLabel).toBe('l3');
 
+    // 第 1 次缺失：BLOCKED(agent)，retryCount=1，retry_at=clock+60s（不再原地立即重试）
+    const w1 = await waitTicket(ctx, id, (t) => t.status === 'BLOCKED' && t.pendingLabel === 'agent' && t.retryCount === 1, '第 1 次 RETRY_WAIT');
+    expect(w1.round).toBe(1);
+    expect(w1.retryAt).toBe(T0 + 60_000);
+    expect(w1.blockReason).toContain('报告缺失');
+    expect(w1.blockReason).toContain(`t${id}.r1.raw.jsonl`);
+
+    // 推进 60s → tick 唤醒 round=2 → 再次缺失：count=2，退避 120s
+    clock += 60_000;
+    const w2 = await waitTicket(ctx, id, (t) => t.status === 'BLOCKED' && t.retryCount === 2, '第 2 次 RETRY_WAIT');
+    expect(w2.round).toBe(2);
+    expect(w2.retryAt).toBe(T0 + 60_000 + 120_000);
+
+    // 推进 120s → round=3：count=3，退避 240s（封顶档全可达）
+    clock += 120_000;
+    const w3 = await waitTicket(ctx, id, (t) => t.status === 'BLOCKED' && t.retryCount === 3, '第 3 次 RETRY_WAIT');
+    expect(w3.round).toBe(3);
+    expect(w3.retryAt).toBe(T0 + 180_000 + 240_000);
+
+    // 推进 240s → 第 4 次进入即升级：pending:l3 + 历次摘要 + system 留言，无额外 transitions 行
+    clock += 240_000;
+    const esc = await waitTicket(ctx, id, (t) => t.status === 'BLOCKED' && t.pendingLabel === 'l3', '升级 l3');
+    expect(esc.round).toBe(4);
+    expect(esc.retryAt).toBeNull();
+    expect(esc.blockReason).toContain('报告缺失重试 3 次后仍失败');
+    expect(esc.blockReason).toContain('失败轮次 1..4');
+    expect(esc.blockReason).toContain(`t${id}.r4.raw.jsonl`);
     const detail = ctx.service.getTicketDetail(id);
-    // 内联卡点：原单 blockReason 含最后一轮 raw 路径 + system 留言全文
-    expect(detail.ticket.blockReason).toContain('报告缺失');
-    expect(detail.ticket.blockReason).toContain(`t${id}.r2.raw.jsonl`);
-    const last = detail.comments.at(-1)!;
-    expect(last.authorType).toBe('system');
-    expect(last.content).toContain('报告缺失');
-    expect(last.content).toContain(`t${id}.r2.raw.jsonl`);
-    // 两轮日志都在
-    expect(existsSync(path.join(ctx.config.dataDir, 'logs', `t${id}.r1.raw.jsonl`))).toBe(true);
-    expect(existsSync(path.join(ctx.config.dataDir, 'logs', `t${id}.r2.raw.jsonl`))).toBe(true);
+    const lastComment = detail.comments.at(-1)!;
+    expect(lastComment.authorType).toBe('system');
+    expect(lastComment.content).toContain('重试耗尽升级人工裁决');
+    // 无额外 transitions 行：4 次缺失=4 条 IN_PROGRESS→BLOCKED，无 BLOCKED→BLOCKED 同态行
+    const blockRows = detail.transitions.filter((x) => x.toStatus === 'BLOCKED');
+    expect(blockRows.length).toBe(4);
+    expect(blockRows.every((x) => x.fromStatus === 'IN_PROGRESS')).toBe(true);
+    // 唤醒轮均有留痕（3 次到期重试）
+    expect(detail.transitions.filter((x) => x.note === 'RETRY_WAIT 到期，自动重试').length).toBe(3);
+    // 四轮日志齐
+    for (const r of [1, 2, 3, 4]) {
+      expect(existsSync(path.join(ctx.config.dataDir, 'logs', `t${id}.r${r}.raw.jsonl`))).toBe(true);
+    }
   });
 });
 
@@ -405,5 +459,416 @@ describe('报告 schema 容忍 null 字段【S2w1 hotfix】', () => {
       JSON.stringify({ status: 'done', summary: 's', commits: null, blockReason: null }));
     const r = readReport(dir);
     expect(r.ok).toBe(true);
+  });
+});
+
+describe('闸门排队：FIFO 恢复与饥饿免疫【S3】', () => {
+  test('闸门=1：二三单排队 GATE_QUEUED，前单 DONE 后 FIFO 依次唤醒执行', async () => {
+    const ctx = createRealContext({
+      autoDispatch: true,
+      maxConcurrentPerRepo: 1,
+      profiles: [{ id: 'fd', command: fixtureCmd('fake-done.mjs') }],
+    });
+    const t1 = await dispatchTicket(ctx, 'fd', { title: '先执行' });
+    const t2 = await dispatchTicket(ctx, 'fd', { title: '排队一' });
+    const t3 = await dispatchTicket(ctx, 'fd', { title: '排队二' });
+    // 排队判定：status=SPEC_READY + queuedReason + worker_id 早绑定
+    for (const tid of [t2, t3]) {
+      const q = ctx.service.getTicket(tid);
+      expect(q.status).toBe('SPEC_READY');
+      expect(q.queuedReason).toBe('GATE_QUEUED');
+      expect(q.workerId).toBe('fd');
+    }
+    expect(ctx.service.getTicket(t2).queuedAt!).toBeLessThanOrEqual(ctx.service.getTicket(t3).queuedAt!);
+
+    await waitStatus(ctx, t1, ['DONE']);
+    await waitStatus(ctx, t2, ['DONE']);
+    await waitStatus(ctx, t3, ['DONE']);
+    // 放行成功清空排队字段
+    expect(ctx.service.getTicket(t2).queuedReason).toBeNull();
+    // FIFO 序：t2 的唤醒转移行先于 t3
+    const wake = (tid: number) =>
+      ctx.service.getTicketDetail(tid).transitions.find((x) => x.note === '排队唤醒，自动放行')!;
+    expect(wake(t2).id).toBeLessThan(wake(t3).id);
+  });
+
+  test('饥饿免疫：前单超时 FAILED → 排队单被唤醒', async () => {
+    const ctx = createRealContext({
+      autoDispatch: true,
+      maxConcurrentPerRepo: 1,
+      timeoutOverrideMs: 300,
+      profiles: [
+        { id: 'fs', command: fixtureCmd('fake-sleep.mjs') },
+        { id: 'fd', command: fixtureCmd('fake-done.mjs') },
+      ],
+    });
+    const t1 = await dispatchTicket(ctx, 'fs', { title: '超时单' });
+    const t2 = await dispatchTicket(ctx, 'fd', { title: '排队单' });
+    expect(ctx.service.getTicket(t2).queuedReason).toBe('GATE_QUEUED');
+    await waitStatus(ctx, t1, ['FAILED']);
+    await waitStatus(ctx, t2, ['DONE']);
+  });
+
+  test('饥饿免疫：前单崩溃 FAILED → 排队单被唤醒', async () => {
+    const ctx = createRealContext({
+      autoDispatch: true,
+      maxConcurrentPerRepo: 1,
+      profiles: [
+        { id: 'fc', command: fixtureCmd('fake-crash.mjs') },
+        { id: 'fd', command: fixtureCmd('fake-done.mjs') },
+      ],
+    });
+    const t1 = await dispatchTicket(ctx, 'fc', { title: '崩溃单' });
+    const t2 = await dispatchTicket(ctx, 'fd', { title: '排队单' });
+    expect(ctx.service.getTicket(t2).queuedReason).toBe('GATE_QUEUED');
+    await waitStatus(ctx, t1, ['FAILED']);
+    await waitStatus(ctx, t2, ['DONE']);
+  });
+
+  test('饥饿免疫：preSpawnFail→CANCELLED → 排队单被唤醒（直调路径）', async () => {
+    const ctx = createRealContext({ autoDispatch: false, maxConcurrentPerRepo: 1 });
+    // t1 service 直推占闸（不触发 spawn），t2 HTTP 放行落队
+    const t1 = ctx.service.createTicket({ type: 'TASK', title: '派发失败单' });
+    ctx.service.submitSpec(t1.id, '# spec');
+    ctx.service.transition(t1.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    const t2 = await dispatchTicket(ctx, 'fake', { title: '排队单' });
+    expect(ctx.service.getTicket(t2).queuedReason).toBe('GATE_QUEUED');
+    // 占用 t1 worktree 路径为普通文件 → startRound allocate 失败 → preSpawnFail→CANCELLED + 唤醒
+    mkdirSync(path.join(ctx.config.dataDir, 'worktrees'), { recursive: true });
+    writeFileSync(ctx.worktree.pathFor('atd', t1.id, ctx.repoPath), 'not a dir');
+    await ctx.dispatcher.startRound(t1.id);
+    expect(ctx.service.getTicket(t1.id).status).toBe('CANCELLED');
+    await waitStatus(ctx, t2, ['DONE']);
+    expect(
+      ctx.service.getTicketDetail(t2).transitions.some((x) => x.note === '排队唤醒，自动放行'),
+    ).toBe(true);
+  });
+
+  test('饥饿免疫：worker 报 blocked → 前单 BLOCKED → 排队单被唤醒', async () => {
+    const ctx = createRealContext({
+      autoDispatch: true,
+      maxConcurrentPerRepo: 1,
+      profiles: [
+        { id: 'fb', command: fixtureCmd('fake-blocked.mjs') },
+        { id: 'fd', command: fixtureCmd('fake-done.mjs') },
+      ],
+    });
+    const t1 = await dispatchTicket(ctx, 'fb', { title: '卡点单' });
+    const t2 = await dispatchTicket(ctx, 'fd', { title: '排队单' });
+    expect(ctx.service.getTicket(t2).queuedReason).toBe('GATE_QUEUED');
+    await waitStatus(ctx, t1, ['BLOCKED']);
+    await waitStatus(ctx, t2, ['DONE']);
+    // 前单保持 BLOCKED 不被波及
+    expect(ctx.service.getTicket(t1).status).toBe('BLOCKED');
+  });
+
+  test('user 取消边（DISPATCHED→CANCELLED）经 service 回调释放闸门 → 排队单唤醒', async () => {
+    const ctx = createRealContext({ autoDispatch: false, maxConcurrentPerRepo: 1 });
+    const t1 = ctx.service.createTicket({ type: 'TASK', title: '被取消单' });
+    ctx.service.submitSpec(t1.id, '# spec');
+    ctx.service.transition(t1.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    const t2 = await dispatchTicket(ctx, 'fake', { title: '排队单' });
+    expect(ctx.service.getTicket(t2).queuedReason).toBe('GATE_QUEUED');
+    // HTTP 取消（user 边）→ service 回调 releaseAndRecheck → t2 唤醒真跑
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tickets/${t1.id}/transition`,
+      payload: { to: 'CANCELLED' },
+    });
+    expect(res.statusCode).toBe(200);
+    await waitStatus(ctx, t2, ['DONE']);
+  });
+
+  test('abort→FAILED 裁决尾直调 releaseAndRecheck → 排队单唤醒', async () => {
+    const ctx = createRealContext({ autoDispatch: false, maxConcurrentPerRepo: 1 });
+    const t1 = ctx.service.createTicket({ type: 'TASK', title: '卡点单' });
+    ctx.service.submitSpec(t1.id, '# spec');
+    ctx.service.transition(t1.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    ctx.service.transition(t1.id, 'IN_PROGRESS', { actor: 'system' });
+    const t2 = await dispatchTicket(ctx, 'fake', { title: '排队单' });
+    expect(ctx.service.getTicket(t2).queuedReason).toBe('GATE_QUEUED');
+    // t1 入 BLOCKED（service 直推，不经 settle——不触发唤醒）
+    ctx.service.transition(t1.id, 'BLOCKED', { actor: 'system', blockReason: 'x' });
+    expect(ctx.service.getTicket(t2).status).toBe('SPEC_READY');
+    // 裁决 abort → FAILED + 直调重校验 → t2 唤醒
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tickets/${t1.id}/resolve`,
+      payload: { resolution: 'abort', note: '终止' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(ctx.service.getTicket(t1.id).status).toBe('FAILED');
+    await waitStatus(ctx, t2, ['DONE']);
+  });
+});
+
+describe('RETRY_WAIT tick 恢复：闸门满顺延与重启重建【S3】', () => {
+  test('到期但闸门满 → retry_at 顺延一个 tick（不落 queued 不转移）；闸门释放后唤醒续跑', async () => {
+    const T0 = 1_700_000_000_000;
+    let clock = T0;
+    const TICK = 25;
+    const ctx = createRealContext({
+      autoDispatch: false,
+      maxConcurrentPerRepo: 1,
+      tickIntervalMs: TICK,
+      now: () => clock,
+    });
+    // t2 先入 RETRY_WAIT 且已到期（此步闸门空闲，walk 不受阻）
+    const t2 = ctx.service.createTicket({ type: 'TASK', title: '自愈单' });
+    ctx.service.submitSpec(t2.id, '# spec');
+    ctx.service.transition(t2.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    ctx.service.transition(t2.id, 'IN_PROGRESS', { actor: 'system' });
+    ctx.service.transition(t2.id, 'BLOCKED', {
+      actor: 'system',
+      pendingLabel: 'agent',
+      blockReason: '报告缺失',
+      retryCount: 1,
+      retryAt: clock - 1,
+    });
+    // t1 占闸（IN_PROGRESS，不 spawn）
+    const t1 = ctx.service.createTicket({ type: 'TASK', title: '占位单' });
+    ctx.service.submitSpec(t1.id, '# spec');
+    ctx.service.transition(t1.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    ctx.service.transition(t1.id, 'IN_PROGRESS', { actor: 'system' });
+    // 等三个 tick：首次顺延后未到新 retry_at，不再连续顺延
+    await sleep(TICK * 3);
+    const mid = ctx.service.getTicket(t2.id);
+    expect(mid.status).toBe('BLOCKED');
+    expect(mid.pendingLabel).toBe('agent');
+    expect(mid.retryAt).toBe(T0 + TICK);
+    expect(mid.queuedReason).toBeNull();
+    // 释放闸门 + 推进时钟 → 唤醒续跑 round=2 → DONE
+    ctx.service.transition(t1.id, 'DONE', { actor: 'system' });
+    clock += 1_000;
+    const done = await waitStatus(ctx, t2.id, ['DONE']);
+    expect(done.round).toBe(1); // 此前轮次为 service 直推（未 spawn），本次唤醒即首轮真实执行
+    expect(done.retryAt).toBeNull();
+    expect(done.retryCount).toBe(1); // 唤醒不清计数（连续失败计数保留）
+  });
+
+  test('重启恢复：到期 RETRY_WAIT 立即恢复执行；未到期不动；排队单重校验一轮', async () => {
+    const ctx = createRealContext({ autoDispatch: false, maxConcurrentPerRepo: 1, tickIntervalMs: 3_600_000 });
+    // t1 RETRY_WAIT 已到期（先走，闸门空闲；BLOCKED 不占闸门）
+    const t1 = ctx.service.createTicket({ type: 'TASK', title: '自愈单' });
+    ctx.service.submitSpec(t1.id, '# spec');
+    ctx.service.transition(t1.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    ctx.service.transition(t1.id, 'IN_PROGRESS', { actor: 'system' });
+    ctx.service.transition(t1.id, 'BLOCKED', {
+      actor: 'system',
+      pendingLabel: 'agent',
+      blockReason: '报告缺失',
+      retryCount: 1,
+      retryAt: Date.now() - 1_000,
+    });
+    // t4 RETRY_WAIT 未到期（重启后不动，计时器由 tick 重建）
+    const t4 = ctx.service.createTicket({ type: 'TASK', title: '未到期自愈单' });
+    ctx.service.submitSpec(t4.id, '# spec');
+    ctx.service.transition(t4.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    ctx.service.transition(t4.id, 'IN_PROGRESS', { actor: 'system' });
+    const t4RetryAt = Date.now() + 3_600_000;
+    ctx.service.transition(t4.id, 'BLOCKED', {
+      actor: 'system',
+      pendingLabel: 'agent',
+      blockReason: '报告缺失',
+      retryCount: 1,
+      retryAt: t4RetryAt,
+    });
+    // t3 派发停留（重启收敛 CANCELLED，释放闸门）
+    const t3 = ctx.service.createTicket({ type: 'TASK', title: '派发停留' });
+    ctx.service.submitSpec(t3.id, '# spec');
+    ctx.service.transition(t3.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    // t2 排队（闸门被 t3 占用）
+    const t2 = await dispatchTicket(ctx, 'fake', { title: '排队单' });
+    expect(ctx.service.getTicket(t2).queuedReason).toBe('GATE_QUEUED');
+
+    ctx.dispatcher.recoverOnStartup();
+
+    // t3 收敛（附留言）
+    expect(ctx.service.getTicket(t3.id).status).toBe('CANCELLED');
+    expect(ctx.service.getTicketDetail(t3.id).comments.at(-1)!.content).toContain('派发失败');
+    // t1 到期即恢复 → 执行 → DONE
+    await waitStatus(ctx, t1.id, ['DONE']);
+    expect(ctx.service.getTicketDetail(t1.id).transitions.some((x) => x.note === 'RETRY_WAIT 到期，自动重试')).toBe(true);
+    // t1 DONE 释放闸门 → 排队单 t2 唤醒执行
+    await waitStatus(ctx, t2, ['DONE']);
+    // t4 未到期：保持 BLOCKED(agent)，计时参数原样
+    const t4After = ctx.service.getTicket(t4.id);
+    expect(t4After.status).toBe('BLOCKED');
+    expect(t4After.pendingLabel).toBe('agent');
+    expect(t4After.retryAt).toBe(t4RetryAt);
+  });
+});
+
+describe('实测防线：DONE settle 交叉预警【S3】', () => {
+  test('T1 未声明真跑 → 与在途声明单 T2 相交 → 双方各落 system 预警；状态不变', async () => {
+    const ctx = createRealContext({
+      autoDispatch: true,
+      maxConcurrentPerRepo: 3,
+      profiles: [{ id: 'fd', command: fixtureCmd('fake-done.mjs') }],
+    });
+    // T1 先 HTTP 放行（立即占闸执行）；T2/T3 service 直推占占用集，不 spawn
+    const t1 = await dispatchTicket(ctx, 'fd', { title: '实测单' });
+    const t2 = ctx.service.createTicket({ type: 'TASK', title: '在途声明单' });
+    ctx.service.submitSpec(t2.id, '# spec', ['atd-artifact.txt']);
+    ctx.service.transition(t2.id, 'DISPATCHED', { actor: 'user', workerId: 'fd' });
+    const t3 = ctx.service.createTicket({ type: 'TASK', title: '在途无关单' });
+    ctx.service.submitSpec(t3.id, '# spec', ['docs/']);
+    ctx.service.transition(t3.id, 'DISPATCHED', { actor: 'user', workerId: 'fd' });
+
+    await waitStatus(ctx, t1, ['DONE']);
+
+    // 实测清单落库（fake-done 改 atd-artifact.txt）
+    const t1Files = ctx.db.select().from(ticketFiles).all().filter((f) => f.ticketId === t1).map((f) => f.path);
+    expect(t1Files).toContain('atd-artifact.txt');
+    // 双留言预警
+    const c1 = ctx.service.getTicketDetail(t1).comments.at(-1)!;
+    expect(c1.authorType).toBe('system');
+    expect(c1.content).toContain('实测防线预警');
+    expect(c1.content).toContain(`#${t2.id}`);
+    expect(c1.content).toContain('atd-artifact.txt');
+    const c2 = ctx.service.getTicketDetail(t2.id).comments.at(-1)!;
+    expect(c2.authorType).toBe('system');
+    expect(c2.content).toContain(`#${t1}`);
+    // 无关单不预警、被预警单状态不变
+    expect(ctx.service.getTicketDetail(t3.id).comments.some((c) => c.content.includes('实测防线预警'))).toBe(false);
+    expect(ctx.service.getTicket(t2.id).status).toBe('DISPATCHED');
+  });
+});
+
+describe('两单并行真跑隔离（双 fake worker）【S3 验收 1】', () => {
+  test('同时放行：worktree/分支/日志/commit/产物互不干扰', async () => {
+    const ctx = createRealContext({
+      autoDispatch: true,
+      maxConcurrentPerRepo: 2,
+      profiles: [
+        { id: 'fa', command: `node ${path.join(FIXTURES_DIR, 'fake-done-arg.mjs')} {{worktree}} {{prompt}} alpha` },
+        { id: 'fb', command: `node ${path.join(FIXTURES_DIR, 'fake-done-arg.mjs')} {{worktree}} {{prompt}} beta` },
+      ],
+    });
+    const t1 = await dispatchTicket(ctx, 'fa', { title: '并行甲', plannedFiles: ['atd-artifact-alpha.txt'] });
+    const t2 = await dispatchTicket(ctx, 'fb', { title: '并行乙', plannedFiles: ['atd-artifact-beta.txt'] });
+    // 两单并行执行（均不排队）
+    const s1 = ctx.service.getTicket(t1).status;
+    expect(['DISPATCHED', 'IN_PROGRESS', 'DONE']).toContain(s1);
+    await waitStatus(ctx, t1, ['DONE']);
+    await waitStatus(ctx, t2, ['DONE']);
+
+    // worktree 隔离：各存各自产物、无对方产物
+    const wt1 = ctx.worktree.pathFor('atd', t1, ctx.repoPath);
+    const wt2 = ctx.worktree.pathFor('atd', t2, ctx.repoPath);
+    expect(wt1).not.toBe(wt2);
+    expect(existsSync(path.join(wt1, 'atd-artifact-alpha.txt'))).toBe(true);
+    expect(existsSync(path.join(wt1, 'atd-artifact-beta.txt'))).toBe(false);
+    expect(existsSync(path.join(wt2, 'atd-artifact-beta.txt'))).toBe(true);
+    expect(existsSync(path.join(wt2, 'atd-artifact-alpha.txt'))).toBe(false);
+    // 分支隔离：各挂各的 atd/atd-t{id}
+    const br1 = execFileSync('git', ['-C', wt1, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).trim();
+    const br2 = execFileSync('git', ['-C', wt2, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).trim();
+    expect(br1).toBe(`atd/atd-t${t1}`);
+    expect(br2).toBe(`atd/atd-t${t2}`);
+    // commit 隔离：各自 HEAD 与各自落库 commit 一致，两单 sha 不同
+    const head1 = execFileSync('git', ['-C', wt1, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const head2 = execFileSync('git', ['-C', wt2, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const d1 = ctx.service.getTicketDetail(t1);
+    const d2 = ctx.service.getTicketDetail(t2);
+    expect(d1.commits).toEqual([{ round: 1, sha: head1 }]);
+    expect(d2.commits).toEqual([{ round: 1, sha: head2 }]);
+    expect(head1).not.toBe(head2);
+    // 日志隔离：各自 r1 日志对
+    for (const tid of [t1, t2]) {
+      expect(existsSync(path.join(ctx.config.dataDir, 'logs', `t${tid}.r1.raw.jsonl`))).toBe(true);
+      expect(existsSync(path.join(ctx.config.dataDir, 'logs', `t${tid}.r1.events.jsonl`))).toBe(true);
+    }
+    // 声明不相交 + 实测各归各：无交叉预警
+    expect(d1.comments.some((c) => c.content.includes('实测防线预警'))).toBe(false);
+    expect(d2.comments.some((c) => c.content.includes('实测防线预警'))).toBe(false);
+  });
+});
+
+describe('排队取消滞留出口与 FILE_CONFLICT 端到端【质量门 r1 hotfix】', () => {
+  test('[medium] 排队中（FILE_CONFLICT）单被取消 → 释放文件集占用位 → 曾被挡住的排队单唤醒执行', async () => {
+    const ctx = createRealContext({ autoDispatch: false });
+    // H：阻塞单持 src/a.ts（占文件集、不占闸门）
+    const h = ctx.service.createTicket({ type: 'TASK', title: '阻塞占位' });
+    ctx.service.submitSpec(h.id, '# spec', ['src/a.ts']);
+    ctx.service.transition(h.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    ctx.service.transition(h.id, 'IN_PROGRESS', { actor: 'system' });
+    ctx.service.transition(h.id, 'BLOCKED', { actor: 'system', blockReason: 'x' });
+    // A：与 H 相交（src/ ⊇ src/a.ts）→ system 放行落队 FILE_CONFLICT
+    const a = ctx.service.createTicket({ type: 'TASK', title: '排队甲', workerId: 'fake' });
+    ctx.service.submitSpec(a.id, '# spec', ['src/']);
+    const qa = ctx.service.transition(a.id, 'DISPATCHED', { actor: 'system' });
+    expect(qa.queuedReason).toBe('FILE_CONFLICT');
+    // B：仅与 A 相交（src/b.ts ∈ src/）、与 H 不相交 → 同样落队（挡住它的是 A）
+    const b = ctx.service.createTicket({ type: 'TASK', title: '排队乙', workerId: 'fake' });
+    ctx.service.submitSpec(b.id, '# spec', ['src/b.ts']);
+    const qb = ctx.service.transition(b.id, 'DISPATCHED', { actor: 'system' });
+    expect(qb.queuedReason).toBe('FILE_CONFLICT');
+    // 闸门空闲（H 为 BLOCKED 不占闸门）——B 滞留的唯一原因是 A 占文件集位
+    expect(ctx.service.gateOccupancy('atd', 'atd')).toBe(0);
+
+    // user 取消 A：释放文件集占用位 → 回调重校验 → B 唤醒自动放行执行
+    const cancelled = ctx.service.transition(a.id, 'CANCELLED', 'user');
+    expect(cancelled.status).toBe('CANCELLED');
+    expect(cancelled.queuedReason).toBeNull();
+    await waitStatus(ctx, b.id, ['DONE']);
+    expect(
+      ctx.service.getTicketDetail(b.id).transitions.some((x) => x.note === '排队唤醒，自动放行'),
+    ).toBe(true);
+    // H 不被波及
+    expect(ctx.service.getTicket(h.id).status).toBe('BLOCKED');
+  });
+
+  test('[low] 验收 2 后半：编排链自动放行遇文件冲突落队 → 占位单离场（裁决终止）→ 排队单自动放行执行', async () => {
+    const ctx = createRealContext({
+      autoDispatch: true,
+      maxConcurrentPerRepo: 2,
+      profiles: [
+        { id: 'fd', command: fixtureCmd('fake-done.mjs') },
+        { id: 'fblk', command: fixtureCmd('fake-blocked.mjs') },
+      ],
+    });
+    // T1：真实跑 fake-blocked → BLOCKED，持 src/ 声明（DISPATCHED 起即占文件集，时序确定）
+    const t1 = await dispatchTicket(ctx, 'fblk', { title: '占位单', plannedFiles: ['src/'] });
+    // 编排链：story → T_a（无声明，fake-done）+ T2（blockedBy T_a，预绑定 fd，声明 src/x.ts 与 T1 相交）
+    const story = ctx.service.createTicket({ type: 'STORY', title: '验收2链' });
+    const ta = ctx.service.createTicket({ type: 'TASK', title: '上游', parentId: story.id });
+    ctx.service.submitSpec(ta.id, '# spec');
+    const t2 = ctx.service.createTicket({ type: 'TASK', title: '下游', parentId: story.id, workerId: 'fd' });
+    ctx.service.submitSpec(t2.id, '# spec', ['src/x.ts']);
+    ctx.service.addDependency(t2.id, ta.id);
+
+    // T_a 落定 → 编排链自动放行 T2 → 与 T1 声明相交 → 保持 SPEC_READY 排队（FILE_CONFLICT）
+    const rTa = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tickets/${ta.id}/transition`,
+      payload: { to: 'DISPATCHED', workerId: 'fd' },
+    });
+    expect(rTa.statusCode).toBe(200);
+    await waitStatus(ctx, ta.id, ['DONE']);
+    const queued = await waitTicket(
+      ctx,
+      t2.id,
+      (t) => t.status === 'SPEC_READY' && t.queuedReason === 'FILE_CONFLICT',
+      'T2 落队 FILE_CONFLICT',
+    );
+    expect(queued.workerId).toBe('fd');
+    // T1 真跑至 BLOCKED（仍占文件集——BLOCKED 单的声明占用保留）
+    await waitStatus(ctx, t1, ['BLOCKED']);
+
+    // 占位单离场：裁决终止 → FAILED（终态离文件集）+ 直调重校验 → T2 自动放行执行至 DONE
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tickets/${t1}/resolve`,
+      payload: { resolution: 'abort', note: '占位终止' },
+    });
+    expect(res.statusCode).toBe(200);
+    await waitStatus(ctx, t1, ['FAILED']);
+    const done = await waitStatus(ctx, t2.id, ['DONE']);
+    expect(
+      ctx.service.getTicketDetail(t2.id).transitions.some((x) => x.note === '排队唤醒，自动放行'),
+    ).toBe(true);
+    // 声明随 submitSpec 冻结，唤醒执行后保持原值
+    expect(done.plannedFiles).toEqual(['src/x.ts']);
   });
 });

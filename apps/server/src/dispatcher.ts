@@ -1,16 +1,17 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, lte } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { WorkerRegistry } from '@atd/worker-core';
 import type { AppConfig } from './config.js';
-import { comments, ticketCommits, ticketDependencies, ticketReports, tickets } from './db/schema.js';
+import { comments, ticketCommits, ticketDependencies, ticketFiles, ticketReports, tickets } from './db/schema.js';
 import type * as schema from './db/schema.js';
 import { AppError } from './domain/errors.js';
+import { intersectingPaths } from './domain/file-set.js';
 import type { Ticket, TicketService } from './domain/ticket-service.js';
 import { startRun, renderTemplate, type RoundResult, type StartedRun } from './execution.js';
 import { buildPermConfig, buildPermJson } from './perm-config.js';
-import { listNewCommits, readReport } from './report.js';
+import { extractTouchedFiles, listNewCommits, readReport } from './report.js';
 import type { WorktreeManager } from './worktree.js';
 import type { WorkspaceRegistry } from './workspaces.js';
 
@@ -29,6 +30,10 @@ export type DispatcherDeps = {
   autoDispatch?: boolean;
   /** 测试注入：覆盖 profile timeoutMin 的超时毫秒数 */
   timeoutOverrideMs?: number;
+  /** RETRY_WAIT 到期扫描周期（ms），缺省 5000；测试注入缩短构造确定时序 */
+  tickIntervalMs?: number;
+  /** 时钟注入（缺省 Date.now）：RETRY_WAIT 退避断言经此构造 */
+  now?: () => number;
 };
 
 /**
@@ -38,11 +43,38 @@ export type DispatcherDeps = {
  */
 export class Dispatcher {
   private readonly running = new Map<number, RunningRound>();
+  private tickTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly deps: DispatcherDeps) {}
 
   get autoDispatch(): boolean {
     return this.deps.autoDispatch ?? true;
+  }
+
+  /** 时钟（缺省 Date.now；测试注入构造退避断言） */
+  private now(): number {
+    return this.deps.now?.() ?? Date.now();
+  }
+
+  /** RETRY_WAIT 到期扫描周期（ms） */
+  private tickIntervalMs(): number {
+    return this.deps.tickIntervalMs ?? 5_000;
+  }
+
+  /** 启动 RETRY_WAIT 到期扫描（buildServer 装配时挂载；unref 不阻进程退出，清理挂 Fastify onClose） */
+  startTick(): void {
+    if (this.tickTimer != null) return;
+    const t = setInterval(() => this.onTick(), this.tickIntervalMs());
+    t.unref?.();
+    this.tickTimer = t;
+  }
+
+  /** 停止扫描（Fastify onClose 钩子调用） */
+  stopTick(): void {
+    if (this.tickTimer != null) {
+      clearInterval(this.tickTimer);
+      this.tickTimer = null;
+    }
   }
 
   isRunning(ticketId: number): boolean {
@@ -61,24 +93,22 @@ export class Dispatcher {
   }
 
   /**
-   * 执行一轮或按 L2 重试循环执行（入口态 DISPATCHED=放行 / IN_PROGRESS=重试或裁决继续）。
-   * 永不 reject（异常内部处置），调用方可安全 fire-and-forget。
+   * 执行一轮（入口态 DISPATCHED=放行或排队唤醒 / IN_PROGRESS=裁决继续）。
+   * 永不 reject（异常内部处置），调用方可安全 fire-and-forget；
+   * 报告缺失/schema 错不再原地续跑——转入 BLOCKED(pending:agent) 由 RETRY_WAIT 引擎接管。
    */
   async startRound(ticketId: number): Promise<void> {
-    let retry = true;
-    while (retry) {
-      retry = await this.runOnce(ticketId);
-    }
+    await this.runOnce(ticketId);
   }
 
-  /** 单轮执行；返回 true=报告缺失且重试未耗尽（L2 重试） */
-  private async runOnce(ticketId: number): Promise<boolean> {
+  /** 单轮执行；结束按判定表分流（DONE/卡点 BLOCKED/FAILED/RETRY_WAIT） */
+  private async runOnce(ticketId: number): Promise<void> {
     const { service, registry, config, worktree, workspaces } = this.deps;
     let run: StartedRun | null = null;
     try {
       const ticket = service.getTicket(ticketId);
       if (ticket.status !== 'DISPATCHED' && ticket.status !== 'IN_PROGRESS') {
-        return false;
+        return;
       }
       const profile = ticket.workerId != null ? registry.get(ticket.workerId) : undefined;
       if (!profile) {
@@ -171,7 +201,7 @@ export class Dispatcher {
       // DISPATCHED→CANCELLED 可重新放行，不落 FAILED 终态
       if (run.pid == null || run.pid <= 0) {
         this.preSpawnFail(ticketId, new Error(`worker 进程无法启动：${argv[0]}（命令不存在或无执行权限）`));
-        return false;
+        return;
       }
 
       // 步 4：spawn 发起成功即进入执行态（round 写入）
@@ -184,7 +214,7 @@ export class Dispatcher {
 
       // 步 5：进程结束 → 判定表分流
       const result = await run.done;
-      return this.settle(ticketId, { round, baseline, wtPath, rawPath, timeoutMs, result });
+      this.settle(ticketId, { round, baseline, wtPath, rawPath, timeoutMs, result });
     } catch (err) {
       // 已 spawn 但状态推进失败（如并发取消）：杀掉进程组防泄漏
       if (run != null && run.pid > 0) {
@@ -195,7 +225,6 @@ export class Dispatcher {
         }
       }
       this.preSpawnFail(ticketId, err);
-      return false;
     } finally {
       this.running.delete(ticketId);
     }
@@ -203,19 +232,20 @@ export class Dispatcher {
 
   /**
    * 判定表分流（自上而下首个命中）：
-   * 超时 → FAILED；退出码非 0 → FAILED（崩溃不重试）；报告 done → DONE（commits 落库）；
-   * 报告 blocked → BLOCKED + BLOCKER；报告缺失/schema 错 → L2 重试或 L3。
-   * 返回 true=需要 L2 重试。
+   * 超时 → FAILED；退出码非 0 → FAILED（崩溃不重试）；报告 done → DONE（commits+实测文件落库、
+   * 声明交叉预警）；报告 blocked → BLOCKED 卡点；报告缺失/schema 错 → RETRY_WAIT 自愈
+   * （先判后等：重试耗尽当次升级 pending:l3）。每个离开执行态的分支尾直调 releaseAndRecheck
+   * 唤醒排队单（饥饿免疫：前单非 DONE 也释放闸门）。
    */
   private settle(
     ticketId: number,
     ctx: { round: number; baseline: string; wtPath: string; rawPath: string; timeoutMs: number; result: RoundResult },
-  ): boolean {
+  ): void {
     const { service, config } = this.deps;
     const ticket = service.getTicket(ticketId);
     if (ticket.status !== 'IN_PROGRESS') {
       // 防御：已被并发处置（理论不可达）
-      return false;
+      return;
     }
     const now = Date.now();
 
@@ -226,7 +256,8 @@ export class Dispatcher {
         authorName: 'atd',
         content: `执行超时：达到 ${ctx.timeoutMs}ms 上限，进程组已终止（round=${ctx.round}；raw 日志：${ctx.rawPath}）`,
       });
-      return false;
+      this.releaseAndRecheck(ticketId);
+      return;
     }
     if (ctx.result.exitCode !== 0) {
       const detail = ctx.result.spawnError
@@ -238,7 +269,8 @@ export class Dispatcher {
         authorName: 'atd',
         content: `worker 进程异常退出（${detail}），判定为崩溃不重试（round=${ctx.round}；raw 日志：${ctx.rawPath}）`,
       });
-      return false;
+      this.releaseAndRecheck(ticketId);
+      return;
     }
 
     const reportRead = readReport(ctx.wtPath);
@@ -263,9 +295,12 @@ export class Dispatcher {
         })
         .run();
       service.transition(ticketId, 'DONE', { actor: 'system', note: 'worker 报告完成' });
+      // 实测防线：基线 diff 提取改动文件落 ticket_files，与同仓占用单声明集交叉比对 → 相交双留言预警
+      this.recordTouchedFilesAndWarn(ticketId, ctx);
       // 编排链自动流转：解锁下游（有 parent 的 TASK 且其余依赖全 DONE 时自动放行）
       this.onTicketSettled(ticketId);
-      return false;
+      this.releaseAndRecheck(ticketId);
+      return;
     }
     if (reportRead.ok && reportRead.report.status === 'blocked') {
       this.deps.db
@@ -290,24 +325,98 @@ export class Dispatcher {
         authorName: 'atd',
         content: `卡点报告：${reportRead.report.blockReason ?? reportRead.report.summary}`,
       });
-      return false;
+      this.releaseAndRecheck(ticketId);
+      return;
     }
 
-    // 报告缺失/schema 错 → L2：重试未耗尽则同 worktree 重新 spawn
-    if (ctx.round <= config.retryOnReportMiss) {
-      return true;
+    // 报告缺失/schema 错 → RETRY_WAIT 自愈（先判后等）：计数递增后超上限当次升级 pending:l3
+    // （历次失败摘要入 blockReason + system 留言，无额外 transitions 行）；否则安排指数退避
+    const missCount = ticket.retryCount + 1;
+    const escalate = missCount > config.maxRetries;
+    if (escalate) {
+      const firstMissRound = ctx.round - missCount + 1;
+      const summary = `报告缺失重试 ${config.maxRetries} 次后仍失败（失败轮次 ${firstMissRound}..${ctx.round}；最后 raw 日志：${ctx.rawPath}）`;
+      service.transition(ticketId, 'BLOCKED', {
+        actor: 'system',
+        note: '报告缺失（重试耗尽，升级人工裁决）',
+        pendingLabel: 'l3',
+        blockReason: summary,
+        retryCount: missCount,
+        retryAt: null,
+      });
+      service.addComment(ticketId, {
+        authorType: 'system',
+        authorName: 'atd',
+        content: `重试耗尽升级人工裁决：${summary}`,
+      });
+    } else {
+      const backoffSec = Math.min(config.retryBackoffSec * 2 ** (missCount - 1), 240);
+      const retryAt = this.now() + backoffSec * 1_000;
+      const reason = `第 ${missCount} 次报告缺失（round=${ctx.round}；raw 日志：${ctx.rawPath}）`;
+      service.transition(ticketId, 'BLOCKED', {
+        actor: 'system',
+        note: '报告缺失，安排自愈重试',
+        pendingLabel: 'agent',
+        blockReason: reason,
+        retryCount: missCount,
+        retryAt,
+      });
+      service.addComment(ticketId, {
+        authorType: 'system',
+        authorName: 'atd',
+        content: `RETRY_WAIT：${reason}；${backoffSec}s 后自动重试（第 ${missCount}/${config.maxRetries} 次）`,
+      });
     }
-    const missReason = `报告缺失/格式错误，重试 ${config.retryOnReportMiss} 次后仍失败（round=${ctx.round}）；最后一轮 raw 日志：${ctx.rawPath}`;
-    service.transition(ticketId, 'BLOCKED', { actor: 'system', note: '报告缺失', blockReason: missReason });
-    service.addComment(ticketId, {
-      authorType: 'system',
-      authorName: 'atd',
-      content: `卡点判定：${missReason}`,
-    });
-    return false;
+    this.releaseAndRecheck(ticketId);
   }
 
-  /** pre-spawn 运行期失败：DISPATCHED 停留 → CANCELLED + 留言；IN_PROGRESS 停留 → FAILED + 留言 */
+  /**
+   * 实测防线（仅 DONE settle）：改动文件按（轮次,路径）落 ticket_files；
+   * 与同 repo 文件集占用单（在途/排队/阻塞）的声明集交叉比对，相交 → 双方各落 system 预警留言
+   * （不改状态不阻塞——合并期问题由人工裁决，ATD 不管理合并）。
+   */
+  private recordTouchedFilesAndWarn(
+    ticketId: number,
+    ctx: { round: number; baseline: string; wtPath: string },
+  ): void {
+    let touched: string[] = [];
+    try {
+      touched = extractTouchedFiles(ctx.wtPath, ctx.baseline);
+    } catch (e) {
+      console.error('[atd-dispatcher] 实测文件提取失败', ticketId, e);
+      return;
+    }
+    for (const p of touched) {
+      this.deps.db
+        .insert(ticketFiles)
+        .values({ ticketId, round: ctx.round, path: p, createdAt: Date.now() })
+        .onConflictDoNothing()
+        .run();
+    }
+    if (touched.length === 0) return;
+    const ticket = this.deps.service.getTicket(ticketId);
+    const holders = this.deps.service.fileSetHolders(ticket.workspaceId, ticket.repoRef, ticketId);
+    for (const holder of holders) {
+      const hit = intersectingPaths(touched, holder.plannedFiles);
+      if (hit.length === 0) continue;
+      const line = hit.join(', ');
+      this.deps.service.addComment(ticketId, {
+        authorType: 'system',
+        authorName: 'atd',
+        content: `实测防线预警：本单实测改动与单 #${holder.id}（${holder.title}）声明文件集相交：${line}`,
+      });
+      this.deps.service.addComment(holder.id, {
+        authorType: 'system',
+        authorName: 'atd',
+        content: `实测防线预警：单 #${ticketId}（${ticket.title}，已 DONE）实测改动与本单声明文件集相交：${line}`,
+      });
+    }
+  }
+
+  /**
+   * pre-spawn 运行期失败：DISPATCHED 停留 → CANCELLED + 留言；IN_PROGRESS 停留 → FAILED + 留言。
+   * 两分支尾均直调 releaseAndRecheck（离开执行态即释放闸门，唤醒排队单）。
+   */
   private preSpawnFail(ticketId: number, err: unknown): void {
     const reason = err instanceof Error ? err.message : String(err);
     try {
@@ -319,6 +428,7 @@ export class Dispatcher {
           authorName: 'atd',
           content: `派发失败：${reason}（本单已取消，为终态；如需重试请基于本单新建工单）`,
         });
+        this.releaseAndRecheck(ticketId);
       } else if (t.status === 'IN_PROGRESS') {
         this.deps.service.transition(ticketId, 'FAILED', { actor: 'system', note: '执行处置失败' });
         this.deps.service.addComment(ticketId, {
@@ -326,6 +436,7 @@ export class Dispatcher {
           authorName: 'atd',
           content: `执行处置失败：${reason}`,
         });
+        this.releaseAndRecheck(ticketId);
       }
     } catch (e) {
       console.error('[atd-dispatcher] 失败处置异常', ticketId, e);
@@ -358,10 +469,18 @@ export class Dispatcher {
       service.addComment(ticketId, { authorType: 'user', authorName: '我', content: input.note });
     }
     if (input.resolution === 'abort') {
-      return service.transition(ticketId, 'FAILED', { actor: 'system', note: '卡点裁决：终止' });
+      const aborted = service.transition(ticketId, 'FAILED', { actor: 'system', note: '卡点裁决：终止' });
+      // 终止单释放文件集占用：直调重校验唤醒排队单
+      this.releaseAndRecheck(ticketId);
+      return aborted;
     }
     if (input.resolution === 'continue') {
-      const t = service.transition(ticketId, 'IN_PROGRESS', { actor: 'system', note: '卡点裁决：继续' });
+      // 人工介入清零 RETRY_WAIT 计数（人工裁决语义与自愈计数不叠加）
+      const t = service.transition(ticketId, 'IN_PROGRESS', {
+        actor: 'system',
+        note: '卡点裁决：继续',
+        clearRetry: true,
+      });
       void this.startRound(ticketId);
       return t;
     }
@@ -369,6 +488,7 @@ export class Dispatcher {
       actor: 'system',
       workerId: input.reassignWorkerId,
       note: '卡点裁决：改派',
+      clearRetry: true,
     });
     void this.startRound(ticketId);
     return t;
@@ -399,6 +519,7 @@ export class Dispatcher {
     const reopened = service.transition(ticketId, 'DISPATCHED', {
       actor: 'user',
       note: '重开：问题未解决',
+      clearRetry: true,
       ...(input.workerId ? { workerId: input.workerId } : {}),
     });
     this.onDispatched(reopened);
@@ -439,7 +560,10 @@ export class Dispatcher {
             actor: 'system',
             note: '编排链依赖满足，自动放行',
           });
-          this.onDispatched(dispatched);
+          // 闸门满/文件冲突时 transition 内部落排队（保持 SPEC_READY），非放行成功不触发 spawn
+          if (dispatched.status === 'DISPATCHED') {
+            this.onDispatched(dispatched);
+          }
         }
       } catch (e) {
         // 单个下游放行失败不阻断其他下游
@@ -448,7 +572,125 @@ export class Dispatcher {
     }
   }
 
-  /** 服务重启恢复：执行单进程已随重启消亡——IN_PROGRESS→FAILED；DISPATCHED→CANCELLED（均附留言） */
+  /**
+   * 队列重校验（排队唤醒单一实现，三类挂载共用：dispatcher 内八处直调 / service 取消边回调 / 启动扫描）。
+   * FIFO 按 queued_at（同刻按 id 兜底）；定向触发=按触发票 workspace+repoRef 过滤（tick/启动扫描不传参走全量）。
+   * 排队单=四件套已全过的「随时可放行」单——唤醒仅重查 Registry∈（worker 可能被删）+ 闸门 + 文件集，
+   * 不重查 worktree/repoRef（system 语义）；每单 try/catch 隔离（单单失败不影响他单）。
+   */
+  releaseAndRecheck(triggerTicketId?: number): void {
+    const { db } = this.deps;
+    let queued = db
+      .select()
+      .from(tickets)
+      .where(and(eq(tickets.status, 'SPEC_READY'), isNotNull(tickets.queuedReason)))
+      .orderBy(asc(tickets.queuedAt), asc(tickets.id))
+      .all()
+      .filter((r) => r.type === 'TASK');
+    if (triggerTicketId != null) {
+      const trigger = db.select().from(tickets).where(eq(tickets.id, triggerTicketId)).get();
+      // 触发票已不可得（理论不可达）时退化为全量扫描
+      if (trigger) {
+        queued = queued.filter(
+          (r) => r.workspaceId === trigger.workspaceId && r.repoRef === trigger.repoRef,
+        );
+      }
+    }
+    for (const row of queued) {
+      try {
+        this.tryReleaseQueued(row);
+      } catch (e) {
+        console.error('[atd-dispatcher] 排队唤醒失败', row.id, e);
+      }
+    }
+  }
+
+  /** 单个排队单重校验：Registry∈ + 闸门 + 文件集全过 → DISPATCHED（system）+ spawn；任一不满足留队 */
+  private tryReleaseQueued(row: typeof tickets.$inferSelect): void {
+    const { service, registry, config } = this.deps;
+    if (!row.workerId || !registry.has(row.workerId)) {
+      // worker 被删或未绑定：留队（下轮触发面再试），不报错
+      return;
+    }
+    if (service.gateOccupancy(row.workspaceId, row.repoRef) >= config.maxConcurrentPerRepo) {
+      return;
+    }
+    const declared = row.plannedFiles != null ? (JSON.parse(row.plannedFiles) as string[]) : [];
+    if (declared.length > 0) {
+      for (const holder of service.fileSetHolders(row.workspaceId, row.repoRef, row.id)) {
+        if (intersectingPaths(declared, holder.plannedFiles).length > 0) {
+          return;
+        }
+      }
+    }
+    const dispatched = service.transition(row.id, 'DISPATCHED', {
+      actor: 'system',
+      note: '排队唤醒，自动放行',
+    });
+    // transition 内部权威复校验后仍可能重新排队（闸门被并发占位）——非放行成功不触发 spawn
+    if (dispatched.status === 'DISPATCHED') {
+      void this.startRound(row.id);
+    }
+  }
+
+  /**
+   * RETRY_WAIT 到期扫描（5s tick）：逐单 try/catch 隔离（单单失败不影响他单，异常 log 不中断批次）。
+   * 恢复顺序写死：先查闸门（自身一直在占用集，文件集不复验——BLOCKED 期间占用保留，占用集单调
+   * 无新增冲突面）→ 闸门满则 retry_at 顺延一个 tickInterval 下轮再试（不落 queued 字段不转移状态）
+   * → 有位则 BLOCKED→DISPATCHED（actor=system，retry 计数保留）重 spawn round+1。
+   */
+  private onTick(): void {
+    const due = this.deps.db
+      .select()
+      .from(tickets)
+      .where(
+        and(
+          eq(tickets.status, 'BLOCKED'),
+          eq(tickets.pendingLabel, 'agent'),
+          isNotNull(tickets.retryAt),
+          lte(tickets.retryAt, this.now()),
+        ),
+      )
+      .all()
+      .filter((r) => r.type === 'TASK');
+    for (const row of due) {
+      try {
+        this.recoverRetryWait(row);
+      } catch (e) {
+        console.error('[atd-dispatcher] RETRY_WAIT 恢复失败', row.id, e);
+      }
+    }
+  }
+
+  /** 单个到期 RETRY_WAIT 单恢复（幂等：状态已转移则忽略） */
+  private recoverRetryWait(row: typeof tickets.$inferSelect): void {
+    const { service, config } = this.deps;
+    const t = service.getTicket(row.id);
+    if (t.status !== 'BLOCKED' || t.pendingLabel !== 'agent' || t.retryAt == null) return;
+    if (service.gateOccupancy(t.workspaceId, t.repoRef) >= config.maxConcurrentPerRepo) {
+      // 闸门满：顺延一个 tick（不落 queued 字段、不转移状态，保持 BLOCKED(pending:agent)）
+      this.deps.db
+        .update(tickets)
+        .set({ retryAt: this.now() + this.tickIntervalMs(), updatedAt: Date.now() })
+        .where(eq(tickets.id, t.id))
+        .run();
+      return;
+    }
+    service.transition(t.id, 'DISPATCHED', {
+      actor: 'system',
+      note: 'RETRY_WAIT 到期，自动重试',
+      // 唤醒即清下次唤醒时刻；retryCount 保留（连续失败计数不因唤醒清零）
+      retryAt: null,
+    });
+    void this.startRound(t.id);
+  }
+
+  /**
+   * 服务重启恢复：
+   * ①执行单进程已随重启消亡——IN_PROGRESS→FAILED；DISPATCHED→CANCELLED（均附留言）；
+   * ②RETRY_WAIT 在途单——到期即恢复（计时器由 tick 重建，未到期不动）；
+   * ③排队单重校验一轮（①释放的闸门位可被②③利用）。
+   */
   recoverOnStartup(): void {
     const { service } = this.deps;
     const rows = this.deps.db
@@ -478,6 +720,29 @@ export class Dispatcher {
         console.error('[atd-dispatcher] 重启恢复失败', row.id, err);
       }
     }
+    // RETRY_WAIT 到期即恢复（每单 try/catch 隔离，与 tick 同一恢复实现）
+    const waiting = this.deps.db
+      .select()
+      .from(tickets)
+      .where(
+        and(
+          eq(tickets.status, 'BLOCKED'),
+          eq(tickets.pendingLabel, 'agent'),
+          isNotNull(tickets.retryAt),
+        ),
+      )
+      .all()
+      .filter((r) => r.type === 'TASK');
+    for (const row of waiting) {
+      if (row.retryAt == null || row.retryAt > this.now()) continue;
+      try {
+        this.recoverRetryWait(row);
+      } catch (err) {
+        console.error('[atd-dispatcher] 重启 RETRY_WAIT 恢复失败', row.id, err);
+      }
+    }
+    // 排队单重校验一轮（全量）
+    this.releaseAndRecheck();
   }
 }
 

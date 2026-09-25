@@ -25,7 +25,7 @@ export type AppRuntime = {
   autoDispatch: boolean;
 };
 
-/** buildServer 入参：测试可注入 autoDispatch/timeoutOverrideMs/前置校验降级 */
+/** buildServer 入参：测试可注入 autoDispatch/timeoutOverrideMs/前置校验降级/tick 时序 */
 export type RuntimeOptions = {
   config: AppConfig;
   registry: WorkerRegistry;
@@ -37,6 +37,10 @@ export type RuntimeOptions = {
   timeoutOverrideMs?: number;
   /** worktree 前置校验：real=真实 mkdir+git 探测（缺省）；skip=纯域测试跳过 */
   worktreeGuard?: 'real' | 'skip';
+  /** RETRY_WAIT 扫描周期（ms）透传 DispatcherDeps（缺省 5000）；测试注入缩短 */
+  tickIntervalMs?: number;
+  /** 时钟注入透传 DispatcherDeps（缺省 Date.now）；退避断言构造用 */
+  now?: () => number;
 };
 
 /**
@@ -90,11 +94,16 @@ export function buildServer(
 ): { app: FastifyInstance; runtime: AppRuntime; worktree: WorktreeManager } {
   const { registry, workspaces } = opts;
   const worktree = new WorktreeManager(opts.config.dataDir);
-  const service = new TicketService(db, workspaces, {
-    knownWorkerIds: () => registry.ids(),
-    assertWorktreeReady:
-      opts.worktreeGuard === 'skip' ? () => {} : (id: number, repoPath: string) => worktree.assertReady(repoPath),
-  });
+  const service = new TicketService(
+    db,
+    workspaces,
+    {
+      knownWorkerIds: () => registry.ids(),
+      assertWorktreeReady:
+        opts.worktreeGuard === 'skip' ? () => {} : (id: number, repoPath: string) => worktree.assertReady(repoPath),
+    },
+    { maxConcurrentPerRepo: opts.config.maxConcurrentPerRepo },
+  );
   const autoDispatch = opts.autoDispatch ?? true;
   const dispatcher = new Dispatcher({
     db,
@@ -105,7 +114,14 @@ export function buildServer(
     workspaces,
     autoDispatch,
     timeoutOverrideMs: opts.timeoutOverrideMs,
+    tickIntervalMs: opts.tickIntervalMs,
+    now: opts.now,
   });
+  // user 取消边释放占用后的队列重校验回调（service 先于 dispatcher 构造，setter 事后注入；
+  // 箭头包裹防 this 丢失；定向传触发票 id，同 workspace+repoRef 排队单重校验）
+  service.onInflightReleased = (ticketId) => dispatcher.releaseAndRecheck(ticketId);
+  // RETRY_WAIT 扫描随 Dispatcher 启动；清理挂 Fastify onClose（AppRuntime 无生命周期概念）
+  dispatcher.startTick();
   const runtime: AppRuntime = {
     service,
     dispatcher,
@@ -115,5 +131,9 @@ export function buildServer(
     workspaces,
     autoDispatch,
   };
-  return { app: buildApp(db, runtime), runtime, worktree };
+  const app = buildApp(db, runtime);
+  app.addHook('onClose', async () => {
+    dispatcher.stopTick();
+  });
+  return { app, runtime, worktree };
 }

@@ -6,6 +6,7 @@ import { listTickets } from '../api/tickets';
 import type { TicketListItem, TicketStatus, TicketType } from '../api/types';
 import StatusTag, { TypeTag, statusLabel, typeLabel } from '../components/StatusTag';
 import CreateTicketModal from '../components/CreateTicketModal';
+import QueuedTag from '../components/QueuedTag';
 import { resolveRepoRefLabel } from '../components/RepoRefTag';
 import { formatTime } from '../utils/format';
 import { useWorkspace } from '../context/WorkspaceContext';
@@ -125,15 +126,24 @@ export default function TicketListPage() {
             {
               title: '状态',
               dataIndex: 'status',
-              width: 150,
+              width: 170,
               render: (_, record) => (
-                <Space size={4}>
+                <Space size={4} wrap>
                   <StatusTag status={record.status} />
-                  {/* BLOCKED=卡点内联待裁决，红标提醒（裁决入口在工作台/详情页） */}
-                  {record.status === 'BLOCKED' && (
-                    <Tag color="red" style={{ marginInlineEnd: 0 }}>
-                      待裁决
-                    </Tag>
+                  {/* BLOCKED 分流徽标：agent=自动重试等待（只读）；其余（l3）=人工待裁决（裁决入口在工作台/详情页） */}
+                  {record.status === 'BLOCKED' &&
+                    (record.pendingLabel === 'agent' ? (
+                      <Tag color="processing" style={{ marginInlineEnd: 0 }}>
+                        自动重试
+                      </Tag>
+                    ) : (
+                      <Tag color="red" style={{ marginInlineEnd: 0 }}>
+                        待裁决
+                      </Tag>
+                    ))}
+                  {/* SPEC_READY 排队行：原因徽标（排队时刻见工作台/详情页） */}
+                  {record.status === 'SPEC_READY' && record.queuedReason != null && (
+                    <QueuedTag ticket={record} showTime={false} />
                   )}
                 </Space>
               ),

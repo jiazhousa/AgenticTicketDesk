@@ -11,6 +11,8 @@ import type {
 
 /** §3 API 契约的 TypeScript 形态——块 B（前端）以此为参照手抄同步，不跨包 import。
  * 统一包裹：成功=资源 JSON 本体；失败=ApiErrorEnvelope。
+ * S3 起 Ticket 携带排队/自愈/声明五字段（queuedReason/queuedAt/retryCount/retryAt/plannedFiles），
+ * 列表与详情随 Ticket 透出；submitSpec 入参扩 plannedFiles（routes 层内联 zod，无独立 Body 类型）。
  */
 export type { Status as TicketStatus, TicketType };
 export type { Ticket, TicketListItem, Comment, Transition, TicketDetail, TicketCommitInfo, TicketReportInfo };

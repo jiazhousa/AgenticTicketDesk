@@ -18,7 +18,8 @@ export type ErrorCode =
   | 'WORKSPACE_UNKNOWN'
   | 'REPO_REF_INVALID'
   | 'REPO_REF_DRIFTED'
-  | 'CROSS_WORKSPACE';
+  | 'CROSS_WORKSPACE'
+  | 'FILE_SET_CONFLICT';
 
 export const ERROR_STATUS: Record<ErrorCode, number> = {
   NOT_FOUND: 404,
@@ -40,6 +41,7 @@ export const ERROR_STATUS: Record<ErrorCode, number> = {
   REPO_REF_INVALID: 422,
   REPO_REF_DRIFTED: 422,
   CROSS_WORKSPACE: 422,
+  FILE_SET_CONFLICT: 422,
 };
 
 /** 领域错误：details 为人类可读明细数组（如未完成依赖单清单） */

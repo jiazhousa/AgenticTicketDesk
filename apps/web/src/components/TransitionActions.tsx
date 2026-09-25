@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Button, Input, Modal, Space, Typography } from 'antd';
+import { Button, Input, Modal, Space, Tooltip, Typography } from 'antd';
 import { RedoOutlined } from '@ant-design/icons';
 import { submitSpec, transitionTicket } from '../api/tickets';
 import type { Ticket, TicketStatus, TicketType } from '../api/types';
 import { statusLabel } from './StatusTag';
 import DispatchForm from './DispatchForm';
+import QueuedTag from './QueuedTag';
 import ReopenModal from './ReopenModal';
 
 /**
@@ -63,11 +64,14 @@ export default function TransitionActions({ ticket, onChanged }: { ticket: Ticke
   // 弹窗状态：null=关闭；'spec'=提交 spec；'dispatch'=TASK 放行（DispatchForm）；'reopen'=终态重开（ReopenModal）；{to}=普通状态转移
   const [modal, setModal] = useState<null | 'spec' | 'dispatch' | 'reopen' | { to: TicketStatus }>(null);
   const [specContent, setSpecContent] = useState('');
+  // 计划改动文件声明文本（每行一个路径；随 submitSpec 提交冻结，DRAFT 编辑态不涉）
+  const [plannedFilesText, setPlannedFilesText] = useState('');
   const [note, setNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   function openSpecModal() {
     setSpecContent(ticket.specContent ?? '');
+    setPlannedFilesText('');
     setModal('spec');
   }
 
@@ -85,7 +89,12 @@ export default function TransitionActions({ ticket, onChanged }: { ticket: Ticke
     setSubmitting(true);
     try {
       if (modal === 'spec') {
-        await submitSpec(ticket.id, specContent.trim());
+        // 每行一个路径，空行忽略；空声明不发送（server 视空数组同未声明，此处直接省字段）
+        const files = plannedFilesText
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line !== '');
+        await submitSpec(ticket.id, specContent.trim(), files.length > 0 ? files : undefined);
       } else if (modal && modal !== 'dispatch' && modal !== 'reopen') {
         // 此处 modal 已窄化为 { to }（'spec'/'dispatch'/'reopen' 各自弹层独立处理）
         const trimmed = note.trim();
@@ -114,16 +123,24 @@ export default function TransitionActions({ ticket, onChanged }: { ticket: Ticke
           提交 spec
         </Button>
       )}
-      {nextStatuses.map((to) => (
-        <Button
-          key={to}
-          danger={to === 'CANCELLED'}
-          type={to === 'CANCELLED' ? 'default' : 'primary'}
-          onClick={() => openTransitionModal(to)}
-        >
-          {ACTION_LABEL[to] ?? to}
-        </Button>
-      ))}
+      {nextStatuses.map((to) => {
+        // 排队单：前序执行释放后由系统自动放行，人工放行入口禁用（取消边不受影响）
+        const queued = to === 'DISPATCHED' && ticket.status === 'SPEC_READY' && ticket.queuedReason != null;
+        return (
+          <Tooltip key={to} title={queued ? '排队中：前序执行释放后系统自动放行，无需人工操作' : undefined}>
+            <Button
+              danger={to === 'CANCELLED'}
+              type={to === 'CANCELLED' ? 'default' : 'primary'}
+              disabled={queued}
+              onClick={() => openTransitionModal(to)}
+            >
+              {ACTION_LABEL[to] ?? to}
+            </Button>
+          </Tooltip>
+        );
+      })}
+      {/* 排队徽标（原因+时刻）：非排队态渲染 null */}
+      <QueuedTag ticket={ticket} />
       {isTerminal && ticket.type === 'TASK' && (
         <Button icon={<RedoOutlined />} onClick={() => setModal('reopen')}>
           重新开单
@@ -155,6 +172,15 @@ export default function TransitionActions({ ticket, onChanged }: { ticket: Ticke
           value={specContent}
           onChange={(e) => setSpecContent(e.target.value)}
           placeholder="填写 spec 快照内容（必填）"
+        />
+        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 4 }}>
+          计划改动文件（可选）：放行前与同仓在途单做文件集冲突检测的依据。
+        </Typography.Paragraph>
+        <Input.TextArea
+          rows={3}
+          value={plannedFilesText}
+          onChange={(e) => setPlannedFilesText(e.target.value)}
+          placeholder={'每行一个相对仓库路径；尾斜杠=目录递归包含\n如：apps/web/src/api/types.ts\n如：packages/worker-core/'}
         />
       </Modal>
 

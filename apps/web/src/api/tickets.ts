@@ -120,11 +120,15 @@ export function updateTicket(id: number, req: UpdateTicketRequest): Promise<Tick
   });
 }
 
-/** §3.5 POST /api/tickets/:id/spec —— 提交 spec（独立路径，转入 SPEC_READY 冻结快照） */
-export function submitSpec(id: number, specContent: string): Promise<Ticket> {
+/**
+ * §3.5 POST /api/tickets/:id/spec —— 提交 spec（独立路径，转入 SPEC_READY 冻结快照）。
+ * plannedFiles 可选声明（每行一路径语义由 UI 层解析；空数组视同未声明，此处直接省字段）。
+ */
+export function submitSpec(id: number, specContent: string, plannedFiles?: string[]): Promise<Ticket> {
+  const body = plannedFiles != null && plannedFiles.length > 0 ? { specContent, plannedFiles } : { specContent };
   return request<Ticket>(`/api/tickets/${id}/spec`, {
     method: 'POST',
-    body: JSON.stringify({ specContent }),
+    body: JSON.stringify(body),
   });
 }
 

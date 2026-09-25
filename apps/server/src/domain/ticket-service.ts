@@ -4,6 +4,7 @@ import { comments, ticketCommits, ticketDependencies, ticketReports, ticketTrans
 import type * as schema from '../db/schema.js';
 import type { WorkspaceRegistry } from '../workspaces.js';
 import { AppError } from './errors.js';
+import { intersectingPaths } from './file-set.js';
 import { TRANSITIONS, isUserEdge, type Status, type TicketType } from './status.js';
 
 /** 工单视图（API/TS 侧 camelCase） */
@@ -23,6 +24,16 @@ export type Ticket = {
   pendingLabel: string | null;
   /** BLOCKED 存续期的卡点原因（内联卡点语义，无独立卡点单）；非 BLOCKED 恒 null */
   blockReason: string | null;
+  /** RETRY_WAIT 自愈失败计数（仅报告缺失/schema 错递增；裁决/重开清零；排队不计入） */
+  retryCount: number;
+  /** RETRY_WAIT 下次唤醒时刻（epoch ms；BLOCKED(pending:agent) 存续期非空） */
+  retryAt: number | null;
+  /** 声明文件集（随 submitSpec 提交冻结；空数组视同未声明 → null） */
+  plannedFiles: string[] | null;
+  /** 排队原因（SPEC_READY 排队存续期 'GATE_QUEUED' | 'FILE_CONFLICT'，其余恒 null） */
+  queuedReason: 'GATE_QUEUED' | 'FILE_CONFLICT' | null;
+  /** 排队进入时刻（epoch ms，FIFO 唤醒排序；重排队保持原值） */
+  queuedAt: number | null;
   round: number;
   createdAt: number;
   updatedAt: number;
@@ -85,6 +96,14 @@ export type TransitionOptions = {
   workerId?: string;
   /** 转 BLOCKED 时落库的卡点原因（worker 报告或系统判定描述）；转出 BLOCKED 自动清空 */
   blockReason?: string | null;
+  /** 转 BLOCKED 时落库的卡点等级（'l3'=人工裁决 / 'agent'=RETRY_WAIT 自愈）；缺省 'l3' */
+  pendingLabel?: string;
+  /** RETRY_WAIT 记账：递增后的重试计数（仅 system 通道自愈路径使用） */
+  retryCount?: number;
+  /** RETRY_WAIT 记账：下次唤醒时刻（null=清除，唤醒转出与升级路径使用） */
+  retryAt?: number | null;
+  /** 清零重试记账（人工裁决 continue/reassign 与重开路径；RETRY_WAIT 计数不跨越人工介入） */
+  clearRetry?: boolean;
   /** 同时写 round 列（spawn 轮次推进，由编排层传入） */
   round?: number;
 };
@@ -95,6 +114,9 @@ export type DispatchGuards = {
   /** repoPath 为按工单挂载解析出的目标仓绝对路径（放行四件套之④ worktree 前置沿用此 hook） */
   assertWorktreeReady(ticketId: number, repoPath: string): void;
 };
+
+/** 并发治理参数（闸门限流阈值；与 config.yaml 三键之一对应） */
+export type DispatchLimits = { maxConcurrentPerRepo: number };
 
 /** 缺省 workspace id（与 tickets.workspace_id 列 DEFAULT 一致；atd.yaml 为仓内自带声明） */
 const DEFAULT_WORKSPACE_ID = 'atd';
@@ -107,7 +129,29 @@ type TxCallback = Parameters<BetterSQLite3Database<typeof schema>['transaction']
 type Tx = Parameters<TxCallback>[0];
 
 function toTicket(row: TicketRow): Ticket {
-  return { ...row, type: row.type as TicketType, status: row.status as Status };
+  return {
+    ...row,
+    type: row.type as TicketType,
+    status: row.status as Status,
+    plannedFiles: parsePlannedFiles(row.plannedFiles),
+    queuedReason: (row.queuedReason as Ticket['queuedReason']) ?? null,
+  };
+}
+
+/** planned_files 列（JSON 数列字符串）读侧还原；空串/损坏 JSON 视同未声明 */
+function parsePlannedFiles(raw: string | null): string[] | null {
+  if (raw == null || raw === '') return null;
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) && v.length > 0 ? (v as string[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 事务前快照：转移发生时单据是否处于排队中（SPEC_READY+queued_reason）——取消边回调判定用原值 */
+function wasQueuedBefore(row: TicketRow): boolean {
+  return row.status === 'SPEC_READY' && row.queuedReason != null;
 }
 
 /** 依赖/子单未完成明细的统一格式：`#<id> <标题>（<状态>）` */
@@ -120,10 +164,20 @@ function pendingLabel(t: Ticket): string {
  * 同步驱动铁则 1：事务回调内只写同步代码（better-sqlite3）。
  */
 export class TicketService {
+  /**
+   * 离开执行态/释放占用后的队列重校验回调（app.ts 装配注入 dispatcher.releaseAndRecheck）。
+   * 枚举挂载面：三条 user 取消边（DISPATCHED→CANCELLED / BLOCKED→CANCELLED 释放闸门+文件集占用；
+   * 排队中 SPEC_READY→CANCELLED 释放文件集占用位——FILE_CONFLICT 后继排队单的滞留出口）；
+   * dispatcher 内部转移（settle/preSpawnFail/abort）由调用侧直调 releaseAndRecheck，不经本回调。
+   * 契约：转移 DB 提交成功后 fire-and-forget 调用，回调异常 log 不抛（不阻塞 user 请求路径）。
+   */
+  onInflightReleased: ((triggerTicketId?: number) => void) | null = null;
+
   constructor(
     private readonly db: BetterSQLite3Database<typeof schema>,
     private readonly workspaces: WorkspaceRegistry,
     private readonly guards?: DispatchGuards,
+    private readonly limits: DispatchLimits = { maxConcurrentPerRepo: 2 },
   ) {}
 
   /**
@@ -371,10 +425,10 @@ export class TicketService {
   }
 
   /**
-   * 提交 spec：写 specContent + 转 SPEC_READY（冻结快照）。
+   * 提交 spec：写 specContent + plannedFiles（随本入口冻结，DRAFT 期不走 updateTicket）+ 转 SPEC_READY。
    * 独立路径，不经 transition()——/transition 端点无法绕开冻结逻辑。
    */
-  submitSpec(id: number, specContent: string): Ticket {
+  submitSpec(id: number, specContent: string, plannedFiles?: string[] | null): Ticket {
     return this.db.transaction((tx) => {
       const row = tx.select().from(tickets).where(eq(tickets.id, id)).get();
       if (!row) throw new AppError('NOT_FOUND', `工单 #${id} 不存在`);
@@ -387,7 +441,13 @@ export class TicketService {
       const now = Date.now();
       const updated = tx
         .update(tickets)
-        .set({ specContent, status: 'SPEC_READY', updatedAt: now })
+        .set({
+          specContent,
+          status: 'SPEC_READY',
+          // 空数组视同未声明（落 NULL，不参与文件集占用）
+          plannedFiles: plannedFiles && plannedFiles.length > 0 ? JSON.stringify(plannedFiles) : null,
+          updatedAt: now,
+        })
         .where(eq(tickets.id, id))
         .returning()
         .get();
@@ -406,10 +466,13 @@ export class TicketService {
   }
 
   /**
-   * 状态转移（白名单 + 通道二分 + blockedBy 门 + STORY 聚合门），事务内落 transitions。
+   * 状态转移（白名单 + 通道二分 + blockedBy 门 + STORY 聚合门 + 并发治理），事务内落 transitions。
    * 判定优先级：to=SPEC_READY 一律 USE_SPEC_ENDPOINT → 不在边表 INVALID_TRANSITION →
    * blockedBy 门（放行最优先）→ user 请求 system 边 MANUAL_FORBIDDEN →
-   * TASK 放行四件套（workerId/Registry/repoRef 复校/worktree）。
+   * TASK 放行四件套（workerId/Registry/repoRef 复校/worktree）→
+   * 闸门/文件集（仅新放行边 SPEC_READY→DISPATCHED；reopen/裁决恢复语义直执行——D8）。
+   * 排队不走状态机：闸门满（两通道）/文件冲突（仅 system 通道）保持 SPEC_READY，
+   * 落 worker_id+queued_reason+queued_at（重排队保持原 queued_at 维持 FIFO 位），无 transitions 行。
    */
   transition(
     id: number,
@@ -421,7 +484,7 @@ export class TicketService {
       typeof opts === 'string' ? { operator: opts, note: legacyNote } : (opts ?? {});
     const actor = o.actor ?? 'user';
     const operator = o.operator ?? actor;
-    return this.db.transaction((tx) => {
+    const result = this.db.transaction((tx) => {
       const row = tx.select().from(tickets).where(eq(tickets.id, id)).get();
       if (!row) throw new AppError('NOT_FOUND', `工单 #${id} 不存在`);
       if (to === 'SPEC_READY') {
@@ -447,8 +510,8 @@ export class TicketService {
       // ②③④⑤ TASK 放行四件套（仅 user 通道）：workerId 必填 → ∈Registry → repoRef 复校 → worktree 可建
       // （重开场景：未指定新 workerId 时沿用原绑定；system 自动放行链不做 repoRef 复校——
       //  spawn 期解析失败走既有 preSpawnFail→CANCELLED 可重派语义，与人工通道分流）
+      let effectiveWorkerId: string | null = o.workerId ?? row.workerId;
       if (row.type === 'TASK' && to === 'DISPATCHED' && actor === 'user') {
-        const effectiveWorkerId = o.workerId ?? row.workerId;
         if (!effectiveWorkerId) {
           throw new AppError('WORKER_REQUIRED', 'TASK 放行必须指定 workerId');
         }
@@ -466,16 +529,46 @@ export class TicketService {
         }
         this.guards?.assertWorktreeReady(id, repoPath);
       }
+      // ⑥ 并发治理（仅新放行边 SPEC_READY→DISPATCHED；校验作用域外的恢复/重开直执行）：
+      // 四件套全过后先闸门后文件集；不满足按通道分流（闸门满两通道一律排队；文件冲突 user 拒绝/system 排队）
+      if (row.type === 'TASK' && to === 'DISPATCHED' && row.status === 'SPEC_READY') {
+        const gateCount = this.gateOccupancy(row.workspaceId, row.repoRef);
+        if (gateCount >= this.limits.maxConcurrentPerRepo) {
+          return this.enqueue(tx, row, effectiveWorkerId, 'GATE_QUEUED');
+        }
+        if (row.plannedFiles != null) {
+          const declared = parsePlannedFiles(row.plannedFiles) ?? [];
+          if (declared.length > 0) {
+            const conflict = this.findFileConflict(tx, row.workspaceId, row.repoRef, id, declared);
+            if (conflict != null) {
+              if (actor === 'user') {
+                throw new AppError(
+                  'FILE_SET_CONFLICT',
+                  'plannedFiles 与同仓在途/排队/阻塞单的声明文件集相交',
+                  conflict,
+                );
+              }
+              return this.enqueue(tx, row, effectiveWorkerId, 'FILE_CONFLICT');
+            }
+          }
+        }
+      }
       const now = Date.now();
       const updated = tx
         .update(tickets)
         .set({
           status: to,
           updatedAt: now,
-          ...(to === 'BLOCKED' ? { pendingLabel: 'l3', ...(o.blockReason != null ? { blockReason: o.blockReason } : {}) } : {}),
+          ...(to === 'BLOCKED'
+            ? { pendingLabel: o.pendingLabel ?? 'l3', ...(o.blockReason != null ? { blockReason: o.blockReason } : {}) }
+            : {}),
           ...(row.status === 'BLOCKED' && to !== 'BLOCKED' ? { pendingLabel: null, blockReason: null } : {}),
+          ...(row.status === 'SPEC_READY' ? { queuedReason: null, queuedAt: null } : {}),
           ...(o.workerId != null ? { workerId: o.workerId } : {}),
           ...(o.round !== undefined ? { round: o.round } : {}),
+          ...(o.retryCount !== undefined ? { retryCount: o.retryCount } : {}),
+          ...(o.retryAt !== undefined ? { retryAt: o.retryAt } : {}),
+          ...(o.clearRetry ? { retryCount: 0, retryAt: null } : {}),
         })
         .where(eq(tickets.id, id))
         .returning()
@@ -490,8 +583,154 @@ export class TicketService {
           createdAt: now,
         })
         .run();
-      return toTicket(updated);
+      return { ticket: toTicket(updated), fromStatus: row.status as Status, wasQueued: wasQueuedBefore(row) };
     });
+    // user 取消边释放占用，提交成功后 fire-and-forget 通知重校验：
+    // DISPATCHED/BLOCKED→CANCELLED 释放闸门+文件集占用；排队中 SPEC_READY→CANCELLED 释放文件集
+    // 占用位（FILE_CONFLICT 后继排队单的滞留出口）。事务内已先清空 queued 字段，故是否「排队中」
+    // 以事务前快照 wasQueued 判定（先清空再回调，触发以原值为准）
+    const inflightReleased = result.fromStatus === 'DISPATCHED' || result.fromStatus === 'BLOCKED';
+    const queueSlotReleased = result.fromStatus === 'SPEC_READY' && result.wasQueued;
+    if (
+      this.onInflightReleased != null &&
+      actor === 'user' &&
+      to === 'CANCELLED' &&
+      (inflightReleased || queueSlotReleased)
+    ) {
+      try {
+        this.onInflightReleased(id);
+      } catch (e) {
+        console.error('[atd-service] onInflightReleased 回调异常', id, e);
+      }
+    }
+    return result.ticket;
+  }
+
+  /**
+   * 排队落库：保持 SPEC_READY（不走状态机、无 transitions 行），写 worker_id 早绑定 + queued 两字段。
+   * 重排队（唤醒后仍不满足）保持原 queued_at 维持 FIFO 位。
+   */
+  private enqueue(
+    tx: Tx,
+    row: TicketRow,
+    workerId: string | null,
+    reason: 'GATE_QUEUED' | 'FILE_CONFLICT',
+  ): { ticket: Ticket; fromStatus: Status; wasQueued: boolean } {
+    const updated = tx
+      .update(tickets)
+      .set({
+        ...(workerId != null ? { workerId } : {}),
+        queuedReason: reason,
+        ...(row.queuedAt == null ? { queuedAt: Date.now() } : {}),
+        updatedAt: Date.now(),
+      })
+      .where(eq(tickets.id, row.id))
+      .returning()
+      .get();
+    return { ticket: toTicket(updated), fromStatus: row.status as Status, wasQueued: wasQueuedBefore(row) };
+  }
+
+  /**
+   * 闸门计数集大小：同 repo（workspace+repoRef）执行中的 TASK 数（DISPATCHED+IN_PROGRESS）。
+   * 排队与 BLOCKED 不占闸门（未在执行）；STORY/DREAM 无执行语义不计入；
+   * repoRef 为 null（非 TASK 语境）无匹配面，恒 0。
+   */
+  gateOccupancy(workspaceId: string, repoRef: string | null): number {
+    if (repoRef == null) return 0;
+    const r = this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(tickets)
+      .where(
+        and(
+          eq(tickets.workspaceId, workspaceId),
+          eq(tickets.repoRef, repoRef),
+          eq(tickets.type, 'TASK'),
+          inArray(tickets.status, ['DISPATCHED', 'IN_PROGRESS']),
+        ),
+      )
+      .get();
+    return Number(r?.n ?? 0);
+  }
+
+  /**
+   * 文件集占用集：同 repo 非终态占用声明的 TASK（DISPATCHED/IN_PROGRESS/SPEC_READY 排队中/BLOCKED 任何
+   * pendingLabel——阻塞单恢复后不得与后来者冲突），仅含已声明 plannedFiles 的单（未声明不占文件集）。
+   */
+  fileSetHolders(
+    workspaceId: string,
+    repoRef: string | null,
+    excludeTicketId?: number,
+  ): Array<{ id: number; title: string; plannedFiles: string[] }> {
+    if (repoRef == null) return [];
+    const rows = this.db
+      .select()
+      .from(tickets)
+      .where(
+        and(
+          eq(tickets.workspaceId, workspaceId),
+          eq(tickets.repoRef, repoRef),
+          eq(tickets.type, 'TASK'),
+          inArray(tickets.status, ['DISPATCHED', 'IN_PROGRESS', 'BLOCKED']),
+        ),
+      )
+      .all();
+    // SPEC_READY 排队中：排队单保留声明占用（放行前概念，与 BLOCKED 同为占用面）
+    const queuedRows = this.db
+      .select()
+      .from(tickets)
+      .where(
+        and(
+          eq(tickets.workspaceId, workspaceId),
+          eq(tickets.repoRef, repoRef),
+          eq(tickets.type, 'TASK'),
+          eq(tickets.status, 'SPEC_READY'),
+          isNotNull(tickets.queuedReason),
+        ),
+      )
+      .all();
+    const holders: Array<{ id: number; title: string; plannedFiles: string[] }> = [];
+    for (const r of [...rows, ...queuedRows]) {
+      if (excludeTicketId != null && r.id === excludeTicketId) continue;
+      const declared = parsePlannedFiles(r.plannedFiles);
+      if (declared == null) continue;
+      holders.push({ id: r.id, title: r.title, plannedFiles: declared });
+    }
+    return holders;
+  }
+
+  /** 声明集与占用集相交明细（放行前置校验）：相交行列表（`单 N 与单 M 文件集相交: a.ts, dir/`），null=无冲突 */
+  private findFileConflict(
+    tx: Tx,
+    workspaceId: string,
+    repoRef: string | null,
+    selfId: number,
+    declared: string[],
+  ): string[] | null {
+    if (repoRef == null) return null;
+    const rows = tx
+      .select()
+      .from(tickets)
+      .where(
+        and(
+          eq(tickets.workspaceId, workspaceId),
+          eq(tickets.repoRef, repoRef),
+          eq(tickets.type, 'TASK'),
+          inArray(tickets.status, ['DISPATCHED', 'IN_PROGRESS', 'BLOCKED', 'SPEC_READY']),
+        ),
+      )
+      .all();
+    const details: string[] = [];
+    for (const r of rows) {
+      if (r.id === selfId) continue;
+      if (r.status === 'SPEC_READY' && r.queuedReason == null) continue;
+      const other = parsePlannedFiles(r.plannedFiles);
+      if (other == null) continue;
+      const hit = intersectingPaths(declared, other);
+      if (hit.length > 0) {
+        details.push(`单 ${selfId} 与单 ${r.id} 文件集相交: ${hit.join(', ')}`);
+      }
+    }
+    return details.length > 0 ? details : null;
   }
 
   /** 轮次推进（L2 重试/裁决继续：状态保持 IN_PROGRESS，仅 round+1），返回新轮次 */

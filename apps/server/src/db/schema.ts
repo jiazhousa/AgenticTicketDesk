@@ -25,10 +25,20 @@ export const tickets = sqliteTable('tickets', {
   workspaceId: text('workspace_id').notNull().default('atd'),
   /** TASK 目标仓 id（∈所属 workspace repos，缺省=主仓 id 落实际值）；非 TASK 无仓语义为 NULL */
   repoRef: text('repo_ref'),
-  /** BLOCKED 存续期的卡点等级（'l3'；后续版本扩 'agent'），转出 BLOCKED 时置 NULL */
+  /** BLOCKED 存续期的卡点等级（'l3'=人工裁决 / 'agent'=RETRY_WAIT 自愈），转出 BLOCKED 时置 NULL */
   pendingLabel: text('pending_label'),
   /** BLOCKED 存续期的卡点原因（内联卡点语义，无独立卡点单）；转出 BLOCKED 时置 NULL */
   blockReason: text('block_reason'),
+  /** RETRY_WAIT 自愈失败计数（仅报告缺失/schema 错递增；裁决/重开清零；排队不计入） */
+  retryCount: integer('retry_count').notNull().default(0),
+  /** RETRY_WAIT 下次唤醒时刻（epoch ms；BLOCKED(pending:agent) 存续期非空） */
+  retryAt: integer('retry_at'),
+  /** 声明文件集（JSON 数列字符串；随 submitSpec 提交冻结；空数组视同未声明） */
+  plannedFiles: text('planned_files'),
+  /** 排队原因（'GATE_QUEUED' | 'FILE_CONFLICT'；SPEC_READY 排队存续期非空） */
+  queuedReason: text('queued_reason'),
+  /** 排队进入时刻（epoch ms；FIFO 唤醒排序依据，重排队保持原值） */
+  queuedAt: integer('queued_at'),
   /** 执行轮次（每次 spawn +1；首轮 1） */
   round: integer('round').notNull().default(0),
   /** 毫秒时间戳 */
@@ -105,3 +115,18 @@ export const ticketReports = sqliteTable('ticket_reports', {
   blockReason: text('block_reason'),
   createdAt: integer('created_at').notNull(),
 });
+
+/** 实测防线：DONE settle 从基线 diff 提取的实际改动文件（每轮全量落库，与 commit 提取同源） */
+export const ticketFiles = sqliteTable(
+  'ticket_files',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    ticketId: integer('ticket_id')
+      .notNull()
+      .references(() => tickets.id),
+    round: integer('round').notNull(),
+    path: text('path').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [uniqueIndex('uq_ticket_file').on(t.ticketId, t.round, t.path)],
+);

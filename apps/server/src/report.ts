@@ -47,3 +47,14 @@ export function listNewCommits(worktreePath: string, baseline: string): string[]
   });
   return out.split('\n').map((l) => l.trim()).filter(Boolean);
 }
+
+/**
+ * 实测防线：该轮实际改动文件清单（基线 diff --name-only，rename 取显示路径）。
+ * 与 commit 提取同源（同一 baseline..HEAD 通道），仅 DONE settle 落库比对。
+ */
+export function extractTouchedFiles(worktreePath: string, baseline: string): string[] {
+  const out = execFileSync('git', ['-C', worktreePath, 'diff', '--name-only', `${baseline}..HEAD`], {
+    encoding: 'utf8',
+  });
+  return out.split('\n').map((l) => l.trim()).filter(Boolean);
+}

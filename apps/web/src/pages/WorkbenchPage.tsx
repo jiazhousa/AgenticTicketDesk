@@ -13,9 +13,10 @@ import StatusTag, { TypeTag, statusLabel } from '../components/StatusTag';
 import BlockedResolutionCard from '../components/BlockedResolutionCard';
 import DispatchForm from '../components/DispatchForm';
 import CreateTicketModal from '../components/CreateTicketModal';
+import QueuedTag from '../components/QueuedTag';
 import RepoRefTag from '../components/RepoRefTag';
-import { formatTime } from '../utils/format';
-import { useInterval } from '../utils/hooks';
+import { formatDuration, formatTime } from '../utils/format';
+import { useInterval, useNow } from '../utils/hooks';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { useWorkspaceMap } from '../utils/workspace';
 
@@ -25,8 +26,10 @@ const POLL_MS = 10000;
 /**
  * 工作台（默认首页）= 人需要关注的内容，三区：
  * ① 新建单入口（弹窗含 TASK 预绑定 worker）
- * ② 阻塞区：BLOCKED 工单（卡点内联：blockReason 摘要两行截断+展开，点「裁决」弹裁决卡直接处理）
- * ③ 待处理区：DRAFT / SPEC_READY 单，附「提交 spec / 放行」快捷操作
+ * ② 阻塞区：BLOCKED 工单按卡点层级分流——l3 人工裁决（弹裁决卡直接处理）；
+ *    agent（RETRY_WAIT）系统自动重试中（只读：次数+倒计时，无需人工处理）
+ * ③ 待处理区：DRAFT / SPEC_READY 单，附「提交 spec / 放行」快捷操作；
+ *    排队单（SPEC_READY+queuedReason）显示排队徽标、隐藏人工放行入口（系统自动放行）
  */
 export default function WorkbenchPage() {
   // 顶栏切换器所选 workspace（null=全部）；切换即触发下方 load 重建重拉
@@ -42,6 +45,8 @@ export default function WorkbenchPage() {
   // 快捷操作弹窗：null 关闭；{kind:'spec',ticket} 提交 spec；{kind:'release-story',ticket} STORY 放行备注
   const [action, setAction] = useState<null | { kind: 'spec' | 'release-story'; ticket: Ticket }>(null);
   const [specContent, setSpecContent] = useState('');
+  // 计划改动文件声明文本（每行一个路径；随 submitSpec 提交冻结）
+  const [plannedFilesText, setPlannedFilesText] = useState('');
   const [releaseNote, setReleaseNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
   // TASK 放行弹层（DispatchForm 自管 worker 选择）
@@ -77,7 +82,12 @@ export default function WorkbenchPage() {
     if (content === '') return;
     setSubmitting(true);
     try {
-      await submitSpec(action.ticket.id, content);
+      // 每行一个路径，空行忽略；空声明不发送（server 视空数组同未声明，此处直接省字段）
+      const files = plannedFilesText
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '');
+      await submitSpec(action.ticket.id, content, files.length > 0 ? files : undefined);
       setAction(null);
       await refreshAfterAction();
     } catch {
@@ -106,6 +116,8 @@ export default function WorkbenchPage() {
   const blockedTickets = blockedItems ?? [];
   const readyTasks = (readyItems ?? []).filter((t) => t.type !== 'DREAM');
   const drafts = (draftItems ?? []).filter((t) => t.type !== 'DREAM');
+  // RETRY_WAIT 倒计时跳动的当前时刻（存在 agent 态阻塞单才启用，避免空转重渲染）
+  const now = useNow(blockedTickets.some((t) => t.pendingLabel === 'agent'));
 
   return (
     <div style={{ padding: 24, maxWidth: 1080, margin: '0 auto' }}>
@@ -164,9 +176,27 @@ export default function WorkbenchPage() {
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                           阻塞于 {formatTime(task.updatedAt)}
                         </Typography.Text>
-                        <Button size="small" type="primary" onClick={() => setResolveTarget(task)}>
-                          裁决
-                        </Button>
+                        {task.pendingLabel === 'agent' ? (
+                          // RETRY_WAIT 自动重试：只读信息（次数+倒计时），不渲染裁决按钮
+                          <Space size={4} wrap>
+                            <Tag color="processing" style={{ marginInlineEnd: 0 }}>
+                              自动重试
+                            </Tag>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              第 {task.retryCount} 次重试等待中 ·{' '}
+                              {task.retryAt == null
+                                ? '等待调度'
+                                : task.retryAt > now
+                                  ? `${formatDuration(task.retryAt - now)}后自动重跑`
+                                  : '即将自动重跑'}{' '}
+                              · 无需人工处理
+                            </Typography.Text>
+                          </Space>
+                        ) : (
+                          <Button size="small" type="primary" onClick={() => setResolveTarget(task)}>
+                            裁决
+                          </Button>
+                        )}
                       </Space>
                       {task.blockReason != null ? (
                         // 卡点原因摘要：两行截断+展开（全文裁决依据在裁决卡内等宽引用块展示）
@@ -214,11 +244,17 @@ export default function WorkbenchPage() {
                             size="small"
                             onClick={() => {
                               setSpecContent(t.specContent ?? '');
+                              setPlannedFilesText('');
                               setAction({ kind: 'spec', ticket: t });
                             }}
                           >
                             提交 spec
                           </Button>
+                        ) : t.status === 'SPEC_READY' && t.queuedReason != null ? (
+                          // 排队单：前序执行释放后系统自动放行，隐藏人工放行入口（徽标在行内容区展示）
+                          <Typography.Text key="queued" type="secondary" style={{ fontSize: 12 }}>
+                            排队中·自动放行
+                          </Typography.Text>
                         ) : t.type === 'TASK' ? (
                           <Button key="release" size="small" type="primary" onClick={() => setDispatchTicket(t)}>
                             放行
@@ -251,6 +287,7 @@ export default function WorkbenchPage() {
                           #{t.id} {t.title}
                         </Link>
                         <RepoRefTag ticket={t} workspaceMap={workspaceMap} />
+                        {t.status === 'SPEC_READY' && t.queuedReason != null && <QueuedTag ticket={t} />}
                         {t.parentId != null && (
                           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                             父单 <Link to={`/tickets/${t.parentId}`}>#{t.parentId}</Link>
@@ -293,6 +330,15 @@ export default function WorkbenchPage() {
           value={specContent}
           onChange={(e) => setSpecContent(e.target.value)}
           placeholder="填写 spec 快照内容（必填）"
+        />
+        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 4 }}>
+          计划改动文件（可选）：放行前与同仓在途单做文件集冲突检测的依据。
+        </Typography.Paragraph>
+        <Input.TextArea
+          rows={3}
+          value={plannedFilesText}
+          onChange={(e) => setPlannedFilesText(e.target.value)}
+          placeholder={'每行一个相对仓库路径；尾斜杠=目录递归包含\n如：apps/web/src/api/types.ts\n如：packages/worker-core/'}
         />
       </Modal>
 

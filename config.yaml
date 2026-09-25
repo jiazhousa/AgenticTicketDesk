@@ -5,5 +5,9 @@ repoPath: .
 dataDir: ~/.local/share/atd
 # 默认单轮执行超时（分钟）；profile 自带 timeoutMin 时以 profile 为准
 defaultTimeoutMin: 60
-# 报告缺失/格式错误时的重试次数（L2）
-retryOnReportMiss: 1
+# 同 repo 并发闸门：同仓同时执行（DISPATCHED+IN_PROGRESS 的 TASK）上限，超出排队（FIFO 按 queued_at）
+maxConcurrentPerRepo: 2
+# 报告缺失/schema 错的自愈重试上限（RETRY_WAIT；连续失败超限即升级人工卡点 BLOCKED(pending:l3)）
+maxRetries: 3
+# 自愈重试退避基数（秒）：第 n 次重试等待 retryBackoffSec×2^(n-1)，封顶 240
+retryBackoffSec: 60

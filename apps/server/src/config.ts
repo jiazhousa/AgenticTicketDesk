@@ -18,8 +18,17 @@ const configSchema = z.object({
   dataDir: z.string().min(1).default('~/.local/share/atd'),
   /** 默认单轮执行超时（分钟）；profile 自带 timeoutMin 时以 profile 为准 */
   defaultTimeoutMin: z.number().int().positive().default(60),
-  /** 报告缺失/格式错误重试次数（L2） */
-  retryOnReportMiss: z.number().int().min(0).default(1),
+  /**
+   * 废弃键（S3 起行为由 maxRetries+retryBackoffSec 取代）：读到仅告警忽略，
+   * 保留 optional 兼容存量 config.yaml。
+   */
+  retryOnReportMiss: z.number().int().min(0).optional(),
+  /** 同 repo 并发闸门：同时执行（DISPATCHED+IN_PROGRESS 的 TASK）上限，超出排队 GATE_QUEUED */
+  maxConcurrentPerRepo: z.number().int().positive().default(2),
+  /** 报告缺失/schema 错的自愈重试上限（RETRY_WAIT；超过即升级 BLOCKED(pending:l3) 人工裁决） */
+  maxRetries: z.number().int().min(0).default(3),
+  /** RETRY_WAIT 退避基数（秒）：第 n 次重试等待 retryBackoffSec×2^(n-1)，封顶 240 */
+  retryBackoffSec: z.number().int().positive().default(60),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;
@@ -52,6 +61,11 @@ export function loadConfig(repoRoot: string): AppConfig {
     throw new Error(`config.yaml 校验失败：${issues.join('；')}`);
   }
   const cfg = parsed.data;
+  if (cfg.retryOnReportMiss != null) {
+    console.warn(
+      `[atd-config] retryOnReportMiss 已废弃（行为由 maxRetries+retryBackoffSec 取代），读取值已忽略`,
+    );
+  }
   const resolved: AppConfig = {
     ...cfg,
     repoPath: cfg.repoPath != null ? path.resolve(repoRoot, expandHome(cfg.repoPath)) : undefined,
