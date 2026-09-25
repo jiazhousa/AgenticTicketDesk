@@ -4,3 +4,5 @@
 {"ts":"2026-09-25T19:54:11+08:00","topic":"atd-s2b1-humanthink","from":"SPEC_DRAFT","to":"SPEC_REVIEWING","actor":"调度者"}
 {"ts":"2026-09-25T19:58:40+08:00","topic":"atd-s2b1-humanthink","from":"SPEC_REVIEWING","to":"SPEC_DRAFT","actor":"审查者"}
 {"ts":"2026-09-25T20:00:05+08:00","topic":"atd-s2b1-humanthink","from":"SPEC_DRAFT","to":"SPEC_REVIEWING","actor":"调度者"}
+{"ts":"2026-09-25T20:04:33+08:00","topic":"atd-s2b1-humanthink","from":"SPEC_REVIEWING","to":"SPEC_DRAFT","actor":"审查者"}
+{"ts":"2026-09-25T20:17:57+08:00","topic":"atd-s2b1-humanthink","from":"SPEC_DRAFT","to":"SPEC_REVIEWING","actor":"调度者"}
