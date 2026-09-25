@@ -13,3 +13,6 @@
 {"ts":"2026-09-25T20:01:47+08:00","topic":"atd-s3-parallel-retry","from":"IMPL_REVIEWING","to":"IMPL_DRAFT","actor":"审查者"}
 {"ts":"2026-09-25T20:03:19+08:00","topic":"atd-s3-parallel-retry","from":"IMPL_DRAFT","to":"IMPL_REVIEWING","actor":"调度者"}
 {"ts":"2026-09-25T20:05:23+08:00","topic":"atd-s3-parallel-retry","from":"IMPL_REVIEWING","to":"IMPL_APPROVED","actor":"审查者"}
+{"ts":"2026-09-25T22:35:24+08:00","topic":"atd-s3-parallel-retry","from":"IMPL_APPROVED","to":"WORKING","actor":"调度者"}
+{"ts":"2026-09-25T22:35:24+08:00","topic":"atd-s3-parallel-retry","from":"WORKING","to":"QUALITY_GATE","actor":"调度者"}
+{"ts":"2026-09-25T22:39:25+08:00","topic":"atd-s3-parallel-retry","from":"QUALITY_GATE","to":"DONE","actor":"审查者"}

@@ -60,7 +60,7 @@ S2a/S2w1 交付了单发执行闭环。当前缺口：多单同时放行无治�
 2. **两个集合**：**闸门计数集** = 同 repo 的 DISPATCHED+IN_PROGRESS（排队与 BLOCKED 不占闸门——未在执行）；**文件集占用集** = 同 repo 的 DISPATCHED+IN_PROGRESS+SPEC_READY 排队中+BLOCKED（非终态都保留其声明占用，防卡点单恢复后与后来者冲突）
 3. **排队生命周期**：进入（闸门满——两通道一律；文件冲突——仅 system 通道排队，user 通道 422 拒绝）→ 挂起（SPEC_READY + queued_reason/queued_at，放行请求不报错）→ 唤醒（触发面见规则 5）→ 重走完整放行前置链（闸门+文件集复校验），仍不满足则重新排队（保持原 queued_at 维持 FIFO 位）；排队字段在成功放行（DISPATCHED）或取消（CANCELLED）时清空；UI 待处理区对排队单不显示放行按钮、显示排队徽标（原因+时刻）
 4. **排队不计入 retryCount**（retryCount 仅 RETRY_WAIT 自愈失败计数）；排队无上限——占用集单必经终态或 BLOCKED，BLOCKED 经人裁决必回执行或终态，无环
-5. **唤醒触发面（单入口收敛）**：任何离开 {DISPATCHED, IN_PROGRESS} 的转移（settle 三终态 + 入 BLOCKED）与 server 启动恢复扫描，统一触发队列重校验；实现挂载点 `onTicketSettled` 扩展为全路径 + BLOCKED 转移钩子
+5. **唤醒触发面（单入口收敛）**：任何离开 {DISPATCHED, IN_PROGRESS} 的转移（settle 三终态 + 入 BLOCKED）与 server 启动恢复扫描，统一触发队列重校验；实现挂载点 `onTicketSettled` 扩展为全路径 + BLOCKED 转移钩子；**取消排队中单（SPEC_READY→CANCELLED）亦触发重校验**（排队单占文件集，其取消释放占用——质量门 r1 勘误补录，2026-09-25）
 6. **RETRY_WAIT 引擎**：报告缺失/schema 错 → IN_PROGRESS→BLOCKED（pendingLabel='agent'——`ticket-service.ts` 现硬编码 'l3' 处参数化，user 通道语义不变）；retry_at=now+60×2^retry_count（封顶 240）；到点 BLOCKED→DISPATCHED 重 spawn（round+1）；retry_count 达 maxRetries → 留 BLOCKED 改 pendingLabel='l3' + blockReason 记录历次摘要；周期扫描 5s tick，幂等
 7. **实测清单口径**：与 commit 提取同源（merge-base..HEAD `--name-only`，rename 取显示路径）；仅 DONE settle 落库比对；比对对象=文件集占用集单的声明集（未声明跳过）
 8. **错误码**：FILE_SET_CONFLICT 入 errors.ts 封闭 union（422）
