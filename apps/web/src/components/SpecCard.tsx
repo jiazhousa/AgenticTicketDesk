@@ -62,6 +62,29 @@ export default function SpecCard({ ticket, onChanged }: { ticket: Ticket; onChan
         <Typography.Text type="secondary">（尚未填写 spec 内容）</Typography.Text>
       )}
 
+      {/* 计划改动文件声明：随 submitSpec 提交冻结（DRAFT 编辑态不涉——不走 PATCH updateTicket）；未声明不渲染 */}
+      {ticket.plannedFiles != null && ticket.plannedFiles.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <Typography.Text type="secondary">计划改动文件（尾斜杠=目录递归包含）：</Typography.Text>
+          <Typography.Paragraph
+            style={{
+              marginTop: 4,
+              marginBottom: 0,
+              padding: '6px 10px',
+              background: '#fafafa',
+              borderRadius: 2,
+              fontFamily:
+                'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+              fontSize: 12,
+              whiteSpace: 'pre-line',
+              wordBreak: 'break-all',
+            }}
+          >
+            {ticket.plannedFiles.join('\n')}
+          </Typography.Paragraph>
+        </div>
+      )}
+
       <Modal
         title={`编辑工单 —— #${ticket.id}`}
         open={open}

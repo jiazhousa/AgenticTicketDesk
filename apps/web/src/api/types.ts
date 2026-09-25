@@ -54,7 +54,7 @@ export interface WorkspaceDetailResponse {
   workspace: Workspace;
 }
 
-/** 工单实体（§3 契约底部定义；S2a 增 round 执行轮次/pendingLabel 卡点层级；S2w1 增 workspace 挂载） */
+/** 工单实体（§3 契约底部定义；S2a 增 round 执行轮次/pendingLabel 卡点层级；S2w1 增 workspace 挂载；S3 增排队/重试自愈五字段——排队不走状态机，保持 SPEC_READY） */
 export interface Ticket {
   id: number;
   type: TicketType;
@@ -70,10 +70,20 @@ export interface Ticket {
   repoRef: string | null;
   /** 执行轮次（spawn 起算，首轮 1；未执行为 0） */
   round: number;
-  /** 卡点层级标签（'l3'，仅 BLOCKED 态非空；S3 扩 'agent'） */
+  /** 卡点层级标签（'l3'=人工裁决卡点；'agent'=自动重试等待；仅 BLOCKED 态非空） */
   pendingLabel: string | null;
-  /** 卡点原因全文（内联卡点语义：仅 BLOCKED 态非空，转出自动清空；用户裁决依据） */
+  /** 卡点原因全文（内联卡点语义：仅 BLOCKED 态非空，转出自动清空；用户裁决依据/自动重试失败摘要） */
   blockReason: string | null;
+  /** 排队原因（放行前置未过落入排队：闸门满两通道一律/文件集冲突仅 system 通道；仅 SPEC_READY 排队中非空，成功放行或取消清空） */
+  queuedReason: 'GATE_QUEUED' | 'FILE_CONFLICT' | null;
+  /** 排队时刻（毫秒时间戳；FIFO 唤醒位依据，唤醒后仍不满足则保持原值重排队） */
+  queuedAt: number | null;
+  /** 自动重试计数（RETRY_WAIT 进入即递增，达 maxRetries 升级 l3；continue/reassign/reopen 清零） */
+  retryCount: number;
+  /** 下次自动重试时刻（毫秒时间戳；BLOCKED(pending:agent) 等待中非空，升级 l3 后不再排期） */
+  retryAt: number | null;
+  /** 计划改动文件声明（相对 repoRef 路径，尾斜杠=目录递归包含；随 submitSpec 提交冻结，未声明为 null） */
+  plannedFiles: string[] | null;
   /** 毫秒时间戳 */
   createdAt: number;
   /** 毫秒时间戳 */
