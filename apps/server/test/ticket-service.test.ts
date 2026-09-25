@@ -422,7 +422,26 @@ describe('user 取消边回调【S3】', () => {
     expect(fired).toEqual([a.id, b.id]);
   });
 
-  test('非挂载面不触发：DRAFT/SPEC_READY 取消、system 通道取消', () => {
+  test('排队中取消（SPEC_READY+queued→CANCELLED）触发回调，queued 字段随取消清空', () => {
+    // 独立上下文：闸门=1 造排队单，回调序断言不受前例影响
+    const ctx = createTestContext({ maxConcurrentPerRepo: 1 });
+    const occ = ctx.service.createTicket({ type: 'TASK', title: '占位' });
+    ctx.service.submitSpec(occ.id, '# spec');
+    ctx.service.transition(occ.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    const q = ctx.service.createTicket({ type: 'TASK', title: '排队取消' });
+    ctx.service.submitSpec(q.id, '# spec');
+    const queued = ctx.service.transition(q.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    expect(queued.queuedReason).toBe('GATE_QUEUED');
+
+    const fired: number[] = [];
+    ctx.service.onInflightReleased = (id) => fired.push(id!);
+    const cancelled = ctx.service.transition(q.id, 'CANCELLED', 'user');
+    expect(cancelled.status).toBe('CANCELLED');
+    expect(cancelled.queuedReason).toBeNull();
+    expect(fired).toEqual([q.id]);
+  });
+
+  test('非挂载面不触发：DRAFT 取消、未排队 SPEC_READY 取消、system 通道取消', () => {
     const { service } = createTestContext();
     const fired: number[] = [];
     service.onInflightReleased = (id) => fired.push(id!);
@@ -431,7 +450,7 @@ describe('user 取消边回调【S3】', () => {
     service.transition(d.id, 'CANCELLED', 'user'); // DRAFT→CANCELLED
     const s = service.createTicket({ type: 'TASK', title: 's' });
     service.submitSpec(s.id, '# spec');
-    service.transition(s.id, 'CANCELLED', 'user'); // SPEC_READY→CANCELLED（排队释放不触发）
+    service.transition(s.id, 'CANCELLED', 'user'); // 未排队 SPEC_READY→CANCELLED（不占文件集，无位可释；排队中取消的触发面见 dispatcher 排队滞留出口用例）
     const x = service.createTicket({ type: 'TASK', title: 'x' });
     walkTo(service, x.id, 'DISPATCHED');
     service.transition(x.id, 'CANCELLED', { actor: 'system' }); // system 通道（dispatcher 直调负责）

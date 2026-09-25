@@ -784,3 +784,91 @@ describe('两单并行真跑隔离（双 fake worker）【S3 验收 1】', () =>
     expect(d2.comments.some((c) => c.content.includes('实测防线预警'))).toBe(false);
   });
 });
+
+describe('排队取消滞留出口与 FILE_CONFLICT 端到端【质量门 r1 hotfix】', () => {
+  test('[medium] 排队中（FILE_CONFLICT）单被取消 → 释放文件集占用位 → 曾被挡住的排队单唤醒执行', async () => {
+    const ctx = createRealContext({ autoDispatch: false });
+    // H：阻塞单持 src/a.ts（占文件集、不占闸门）
+    const h = ctx.service.createTicket({ type: 'TASK', title: '阻塞占位' });
+    ctx.service.submitSpec(h.id, '# spec', ['src/a.ts']);
+    ctx.service.transition(h.id, 'DISPATCHED', { actor: 'user', workerId: 'fake' });
+    ctx.service.transition(h.id, 'IN_PROGRESS', { actor: 'system' });
+    ctx.service.transition(h.id, 'BLOCKED', { actor: 'system', blockReason: 'x' });
+    // A：与 H 相交（src/ ⊇ src/a.ts）→ system 放行落队 FILE_CONFLICT
+    const a = ctx.service.createTicket({ type: 'TASK', title: '排队甲', workerId: 'fake' });
+    ctx.service.submitSpec(a.id, '# spec', ['src/']);
+    const qa = ctx.service.transition(a.id, 'DISPATCHED', { actor: 'system' });
+    expect(qa.queuedReason).toBe('FILE_CONFLICT');
+    // B：仅与 A 相交（src/b.ts ∈ src/）、与 H 不相交 → 同样落队（挡住它的是 A）
+    const b = ctx.service.createTicket({ type: 'TASK', title: '排队乙', workerId: 'fake' });
+    ctx.service.submitSpec(b.id, '# spec', ['src/b.ts']);
+    const qb = ctx.service.transition(b.id, 'DISPATCHED', { actor: 'system' });
+    expect(qb.queuedReason).toBe('FILE_CONFLICT');
+    // 闸门空闲（H 为 BLOCKED 不占闸门）——B 滞留的唯一原因是 A 占文件集位
+    expect(ctx.service.gateOccupancy('atd', 'atd')).toBe(0);
+
+    // user 取消 A：释放文件集占用位 → 回调重校验 → B 唤醒自动放行执行
+    const cancelled = ctx.service.transition(a.id, 'CANCELLED', 'user');
+    expect(cancelled.status).toBe('CANCELLED');
+    expect(cancelled.queuedReason).toBeNull();
+    await waitStatus(ctx, b.id, ['DONE']);
+    expect(
+      ctx.service.getTicketDetail(b.id).transitions.some((x) => x.note === '排队唤醒，自动放行'),
+    ).toBe(true);
+    // H 不被波及
+    expect(ctx.service.getTicket(h.id).status).toBe('BLOCKED');
+  });
+
+  test('[low] 验收 2 后半：编排链自动放行遇文件冲突落队 → 占位单离场（裁决终止）→ 排队单自动放行执行', async () => {
+    const ctx = createRealContext({
+      autoDispatch: true,
+      maxConcurrentPerRepo: 2,
+      profiles: [
+        { id: 'fd', command: fixtureCmd('fake-done.mjs') },
+        { id: 'fblk', command: fixtureCmd('fake-blocked.mjs') },
+      ],
+    });
+    // T1：真实跑 fake-blocked → BLOCKED，持 src/ 声明（DISPATCHED 起即占文件集，时序确定）
+    const t1 = await dispatchTicket(ctx, 'fblk', { title: '占位单', plannedFiles: ['src/'] });
+    // 编排链：story → T_a（无声明，fake-done）+ T2（blockedBy T_a，预绑定 fd，声明 src/x.ts 与 T1 相交）
+    const story = ctx.service.createTicket({ type: 'STORY', title: '验收2链' });
+    const ta = ctx.service.createTicket({ type: 'TASK', title: '上游', parentId: story.id });
+    ctx.service.submitSpec(ta.id, '# spec');
+    const t2 = ctx.service.createTicket({ type: 'TASK', title: '下游', parentId: story.id, workerId: 'fd' });
+    ctx.service.submitSpec(t2.id, '# spec', ['src/x.ts']);
+    ctx.service.addDependency(t2.id, ta.id);
+
+    // T_a 落定 → 编排链自动放行 T2 → 与 T1 声明相交 → 保持 SPEC_READY 排队（FILE_CONFLICT）
+    const rTa = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tickets/${ta.id}/transition`,
+      payload: { to: 'DISPATCHED', workerId: 'fd' },
+    });
+    expect(rTa.statusCode).toBe(200);
+    await waitStatus(ctx, ta.id, ['DONE']);
+    const queued = await waitTicket(
+      ctx,
+      t2.id,
+      (t) => t.status === 'SPEC_READY' && t.queuedReason === 'FILE_CONFLICT',
+      'T2 落队 FILE_CONFLICT',
+    );
+    expect(queued.workerId).toBe('fd');
+    // T1 真跑至 BLOCKED（仍占文件集——BLOCKED 单的声明占用保留）
+    await waitStatus(ctx, t1, ['BLOCKED']);
+
+    // 占位单离场：裁决终止 → FAILED（终态离文件集）+ 直调重校验 → T2 自动放行执行至 DONE
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/tickets/${t1}/resolve`,
+      payload: { resolution: 'abort', note: '占位终止' },
+    });
+    expect(res.statusCode).toBe(200);
+    await waitStatus(ctx, t1, ['FAILED']);
+    const done = await waitStatus(ctx, t2.id, ['DONE']);
+    expect(
+      ctx.service.getTicketDetail(t2.id).transitions.some((x) => x.note === '排队唤醒，自动放行'),
+    ).toBe(true);
+    // 声明随 submitSpec 冻结，唤醒执行后保持原值
+    expect(done.plannedFiles).toEqual(['src/x.ts']);
+  });
+});

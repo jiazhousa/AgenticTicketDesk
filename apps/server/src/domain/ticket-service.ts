@@ -149,6 +149,11 @@ function parsePlannedFiles(raw: string | null): string[] | null {
   }
 }
 
+/** 事务前快照：转移发生时单据是否处于排队中（SPEC_READY+queued_reason）——取消边回调判定用原值 */
+function wasQueuedBefore(row: TicketRow): boolean {
+  return row.status === 'SPEC_READY' && row.queuedReason != null;
+}
+
 /** 依赖/子单未完成明细的统一格式：`#<id> <标题>（<状态>）` */
 function pendingLabel(t: Ticket): string {
   return `#${t.id} ${t.title}（${t.status}）`;
@@ -161,7 +166,8 @@ function pendingLabel(t: Ticket): string {
 export class TicketService {
   /**
    * 离开执行态/释放占用后的队列重校验回调（app.ts 装配注入 dispatcher.releaseAndRecheck）。
-   * 枚举挂载面：仅两条 user 取消边（DISPATCHED→CANCELLED / BLOCKED→CANCELLED）在此触发；
+   * 枚举挂载面：三条 user 取消边（DISPATCHED→CANCELLED / BLOCKED→CANCELLED 释放闸门+文件集占用；
+   * 排队中 SPEC_READY→CANCELLED 释放文件集占用位——FILE_CONFLICT 后继排队单的滞留出口）；
    * dispatcher 内部转移（settle/preSpawnFail/abort）由调用侧直调 releaseAndRecheck，不经本回调。
    * 契约：转移 DB 提交成功后 fire-and-forget 调用，回调异常 log 不抛（不阻塞 user 请求路径）。
    */
@@ -577,14 +583,19 @@ export class TicketService {
           createdAt: now,
         })
         .run();
-      return { ticket: toTicket(updated), fromStatus: row.status as Status };
+      return { ticket: toTicket(updated), fromStatus: row.status as Status, wasQueued: wasQueuedBefore(row) };
     });
-    // user 取消边（DISPATCHED/BLOCKED→CANCELLED）释放闸门/文件集占用：提交成功后 fire-and-forget 通知重校验
+    // user 取消边释放占用，提交成功后 fire-and-forget 通知重校验：
+    // DISPATCHED/BLOCKED→CANCELLED 释放闸门+文件集占用；排队中 SPEC_READY→CANCELLED 释放文件集
+    // 占用位（FILE_CONFLICT 后继排队单的滞留出口）。事务内已先清空 queued 字段，故是否「排队中」
+    // 以事务前快照 wasQueued 判定（先清空再回调，触发以原值为准）
+    const inflightReleased = result.fromStatus === 'DISPATCHED' || result.fromStatus === 'BLOCKED';
+    const queueSlotReleased = result.fromStatus === 'SPEC_READY' && result.wasQueued;
     if (
       this.onInflightReleased != null &&
       actor === 'user' &&
       to === 'CANCELLED' &&
-      (result.fromStatus === 'DISPATCHED' || result.fromStatus === 'BLOCKED')
+      (inflightReleased || queueSlotReleased)
     ) {
       try {
         this.onInflightReleased(id);
@@ -604,7 +615,7 @@ export class TicketService {
     row: TicketRow,
     workerId: string | null,
     reason: 'GATE_QUEUED' | 'FILE_CONFLICT',
-  ): { ticket: Ticket; fromStatus: Status } {
+  ): { ticket: Ticket; fromStatus: Status; wasQueued: boolean } {
     const updated = tx
       .update(tickets)
       .set({
@@ -616,7 +627,7 @@ export class TicketService {
       .where(eq(tickets.id, row.id))
       .returning()
       .get();
-    return { ticket: toTicket(updated), fromStatus: row.status as Status };
+    return { ticket: toTicket(updated), fromStatus: row.status as Status, wasQueued: wasQueuedBefore(row) };
   }
 
   /**
