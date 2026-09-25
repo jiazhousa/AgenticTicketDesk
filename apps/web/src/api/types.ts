@@ -177,6 +177,11 @@ export interface WorkerInfo {
   protocol: string;
   /** 能力集（S2a 仅 task；interactive 随 S2b） */
   capabilities: string[];
+  /**
+   * 声明能力的可承载性（S2b1：Registry 校验——interactive 能力但协议不支撑 serve 常驻时 false，
+   * 聊天框新建会话下拉过滤依据）；缺省视为可用。
+   */
+  available?: boolean;
 }
 
 /** 统一事件流（@atd/worker-core events.ts 的 API 形态，手抄同步；字段按 UI 消费最小集宽松定义） */
@@ -190,6 +195,10 @@ export interface UnifiedEvent {
     | 'finish'
     | 'turn-start'
     | 'turn-end'
+    /** S2b1 扩展：推理块（humanthink 面映射，{text, phase}） */
+    | 'reasoning'
+    /** S2b1 扩展：审批请求/裁决（含历史回溯并入同型，status 区分待审与已裁决） */
+    | 'permission_request'
     | (string & {});
   /** 事件时间戳（毫秒，字段缺失时不展示时间） */
   timestamp?: number;
@@ -201,6 +210,16 @@ export interface UnifiedEvent {
   errored?: boolean;
   /** finish：进程正常结束标记 */
   success?: boolean;
+  /** reasoning：推理阶段标记 */
+  phase?: string;
+  /** permission_request：审批请求 id */
+  requestID?: string;
+  /** permission_request：动作词汇（shell/read/external_directory/…） */
+  action?: string;
+  /** permission_request：资源路径列表 */
+  resources?: string[];
+  /** permission_request：审批状态（pending=待审，resolved=已裁决） */
+  status?: 'pending' | 'resolved';
 }
 
 /** 执行日志响应（GET /api/tickets/:id/logs） */
@@ -261,4 +280,137 @@ export interface ApiErrorBody {
     message: string;
     details?: string[];
   };
+}
+
+/* ==================== S2b1 HumanThink 聊天面（手抄同步，对齐 impl「API 契约冻结」节） ==================== */
+
+/**
+ * HumanThink 会话（humanthink_sessions 的 API 形态）。
+ * 三分语义：列表排除已删；详情恒可读（内嵌历史事件）；已删（deletedAt 非空）会话的
+ * prompt/interrupt/delete/reply/SSE 一律 422 SESSION_TERMINATED——前端转只读视图。
+ */
+export interface HumanThinkSession {
+  /** 会话 id（serve 侧 sessionID，SSE/操作端点定位符） */
+  id: string;
+  workerId: string;
+  workspaceId: string;
+  /** 会话工作目录（serve 侧 location.directory） */
+  directory: string;
+  title: string;
+  /** 毫秒时间戳 */
+  createdAt: number;
+  /** 删除时刻（毫秒）；非空=已删除只读 */
+  deletedAt: number | null;
+}
+
+/** POST /api/humanthink/sessions 建会话请求体 */
+export interface CreateHumanThinkSessionRequest {
+  workerId: string;
+  workspaceId: string;
+  title?: string;
+}
+
+/** POST /api/humanthink/sessions 响应（`{ session }` 包裹） */
+export interface CreateHumanThinkSessionResponse {
+  session: HumanThinkSession;
+}
+
+/** GET /api/humanthink/sessions?workspaceId=&q= 响应（排除已删；q=title+文本 payload LIKE） */
+export interface HumanThinkSessionListResponse {
+  items: HumanThinkSession[];
+}
+
+/** GET /api/humanthink/sessions/:id 响应（详情内嵌只读历史事件——已删会话历史的唯一读通道） */
+export interface HumanThinkSessionDetailResponse {
+  session: HumanThinkSession;
+  events: HumanThinkEvent[];
+}
+
+/** 待审权限请求项（GET .../:id/permission/requests 列表项，items=当前待审集合） */
+export interface HumanThinkPermissionRequest {
+  requestID: string;
+  /** 动作词汇（shell/read/external_directory/…） */
+  action: string;
+  resources: string[];
+}
+
+/** GET .../:id/permission/requests 响应 */
+export interface HumanThinkPermissionListResponse {
+  items: HumanThinkPermissionRequest[];
+}
+
+/** POST .../permission/:requestID/reply 请求体（once=当次批准；always 不开放——防静默授权扩散） */
+export interface HumanThinkPermissionReplyRequest {
+  decision: 'once' | 'reject';
+  message?: string;
+}
+
+/** prompt 响应（消息已受理，回复经事件流返回） */
+export interface HumanThinkPromptResponse {
+  admitted: true;
+}
+
+/** interrupt / delete / reply 共用 `{ ok: true }` 响应 */
+export interface HumanThinkOkResponse {
+  ok: true;
+}
+
+/**
+ * 镜像事件 type 值域：durable 镜像行（serve 事件派生 + ATD 自有审批两型）+ live delta 转发帧。
+ * durable 帧带 seq（断线重连游标）；delta 帧无 seq（不重放，UI 以镜像全文对齐）。
+ */
+export type HumanThinkEventType =
+  /** 助手消息全文（镜像主源，载荷 text） */
+  | 'text.ended'
+  | 'reasoning.started'
+  /** 思考全文（载荷缺全文时仅标记） */
+  | 'reasoning.ended'
+  | 'tool.called'
+  | 'tool.success'
+  | 'tool.failed'
+  | 'tool.progress'
+  | 'step.started'
+  | 'step.ended'
+  | 'permission.asked'
+  | 'permission.rejected'
+  /** ATD 自有：审批请求落镜像（恢复后回溯依据） */
+  | 'permission_request'
+  /** ATD 自有：审批裁决落镜像 */
+  | 'permission_resolved'
+  /** 以下为 live 转发帧（不落镜像、不重放） */
+  | 'session.text.delta'
+  | 'session.reasoning.delta';
+
+/**
+ * HumanThink 事件（humanthink_events 行/转发帧的 API 形态；字段按 UI 消费最小集宽松展开，
+ * 同 UnifiedEvent 惯例——payload 字段平铺在事件对象上）。
+ */
+export interface HumanThinkEvent {
+  type: HumanThinkEventType | (string & {});
+  /** 本地展示序（每会话递增）；durable 镜像行必有，delta 转发帧无（断线重连以最后 durable seq 为 after） */
+  seq?: number;
+  /** 事件时间戳（毫秒，字段缺失时不展示时间） */
+  timestamp?: number;
+  /** text.ended / reasoning.ended / session.*.delta：文本全文或增量 */
+  text?: string;
+  /** 对账行若携带角色信息，user 消息渲染为用户气泡（镜像不含用户消息型，此为防御位） */
+  role?: 'user' | 'assistant';
+  /** tool.*：工具名 */
+  tool?: string;
+  /** permission.* / permission_request / permission_resolved：审批请求 id */
+  requestID?: string;
+  /** permission.*：动作词汇 */
+  action?: string;
+  /** permission.*：资源路径列表 */
+  resources?: string[];
+  /** permission_request：审批状态（pending=待审，resolved=已裁决） */
+  status?: 'pending' | 'resolved';
+  /** permission_resolved：裁决值（once=当次批准，reject=拒绝） */
+  decision?: 'once' | 'reject';
+}
+
+/** SSE 帧：`data: {seq?, event}`——durable 事件带 seq、delta 帧无 seq */
+export interface HumanThinkEventFrame {
+  seq?: number;
+  event: HumanThinkEvent;
 }

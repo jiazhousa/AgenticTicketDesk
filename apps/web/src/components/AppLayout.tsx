@@ -5,14 +5,15 @@ import { useWorkspace } from '../context/WorkspaceContext';
 import { useWorkspaceMap } from '../utils/workspace';
 
 /**
- * 全局布局：顶栏导航在「工作台 / 仪表盘 / 工单列表」三入口间切换；
+ * 全局布局：顶栏导航在「工作台 / 仪表盘 / 工单列表 / 聊天」四入口间切换；
  * 右侧 workspace 切换器（「全部」+ 各 workspace「显示名 · 主仓名」）——
- * 切换即更新全局态，三页列表随所选 workspace 过滤（null=全部=不传过滤参数）。
+ * 切换即更新全局态，各页列表随所选 workspace 过滤（null=全部=不传过滤参数）。
  */
 const NAV_ITEMS = [
   { key: '/workbench', label: '工作台' },
   { key: '/dashboard', label: '仪表盘' },
   { key: '/tickets', label: '工单列表' },
+  { key: '/humanthink', label: '聊天' },
 ];
 
 /** 「全部」选项哨兵值（Select 值域为 string，Context 态以 null 表达） */
