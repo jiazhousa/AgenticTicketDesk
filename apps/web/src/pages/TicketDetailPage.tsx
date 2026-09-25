@@ -6,6 +6,7 @@ import { getTicket } from '../api/tickets';
 import type { TicketDetail } from '../api/types';
 import StatusTag, { TypeTag } from '../components/StatusTag';
 import { resolveRepoRefLabel } from '../components/RepoRefTag';
+import QueuedTag from '../components/QueuedTag';
 import TransitionActions from '../components/TransitionActions';
 import SpecCard from '../components/SpecCard';
 import DependencyPanel from '../components/DependencyPanel';
@@ -15,7 +16,8 @@ import ExecutionCard from '../components/ExecutionCard';
 import StorySwimlane from '../components/StorySwimlane';
 import ReportCard from '../components/ReportCard';
 import BlockedResolutionCard from '../components/BlockedResolutionCard';
-import { formatTime } from '../utils/format';
+import { formatDuration, formatTime } from '../utils/format';
+import { useNow } from '../utils/hooks';
 import { useWorkspaceMap } from '../utils/workspace';
 
 /**
@@ -58,6 +60,9 @@ export default function TicketDetailPage() {
   const reload = useCallback(() => {
     void load(ticketId, detail != null);
   }, [ticketId, detail, load]);
+
+  // RETRY_WAIT 倒计时跳动的当前时刻（agent 态阻塞单才启用；须位于早退分支之前保证 hook 顺序稳定）
+  const now = useNow(detail != null && detail.ticket.status === 'BLOCKED' && detail.ticket.pendingLabel === 'agent');
 
   const invalidId = !Number.isInteger(ticketId) || ticketId <= 0;
   if (invalidId || (failed && detail == null)) {
@@ -137,9 +142,17 @@ export default function TicketDetailPage() {
               {detail.workerName ?? ticket.workerId ?? '（未绑定）'}
             </Descriptions.Item>
             <Descriptions.Item label="执行轮次">{ticket.round}</Descriptions.Item>
+            {/* 排队信息（原因+时刻）：SPEC_READY 排队中展示（前序释放后系统自动放行） */}
+            {ticket.status === 'SPEC_READY' && ticket.queuedReason != null && (
+              <Descriptions.Item label="排队">
+                <QueuedTag ticket={ticket} />
+              </Descriptions.Item>
+            )}
             {ticket.pendingLabel != null && (
               <Descriptions.Item label="卡点层级">
-                <Typography.Text type="danger">{ticket.pendingLabel}</Typography.Text>
+                <Typography.Text type="danger">
+                  {ticket.pendingLabel === 'agent' ? 'agent（自动重试中）' : ticket.pendingLabel}
+                </Typography.Text>
               </Descriptions.Item>
             )}
             <Descriptions.Item label="描述" span={3}>
@@ -167,8 +180,36 @@ export default function TicketDetailPage() {
           <ReportCard report={detail.report} commits={detail.commits} />
         )}
 
-        {/* 卡4：卡点裁决（BLOCKED 态内联：卡点=本单状态，blockReason 全文展示，直接裁决转出） */}
-        {ticket.status === 'BLOCKED' && (
+        {/* 卡4：BLOCKED 分流——pending:agent=RETRY_WAIT 自动重试（只读信息，不渲染裁决按钮）；其余（l3）=人工卡点裁决 */}
+        {ticket.status === 'BLOCKED' && ticket.pendingLabel === 'agent' && (
+          <Card title="自动重试（无需人工处理）">
+            <Space direction="vertical" style={{ width: '100%' }} size="small">
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="重试次数">第 {ticket.retryCount} 次</Descriptions.Item>
+                <Descriptions.Item label="下次自动重试">
+                  {ticket.retryAt == null
+                    ? '等待调度'
+                    : `${formatTime(ticket.retryAt)}（${
+                        ticket.retryAt > now ? `剩余 ${formatDuration(ticket.retryAt - now)}` : '即将重试'
+                      }）`}
+                </Descriptions.Item>
+              </Descriptions>
+              {ticket.blockReason != null && (
+                <Typography.Paragraph
+                  type="secondary"
+                  style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}
+                  ellipsis={{ rows: 4, expandable: true, symbol: '展开' }}
+                >
+                  {ticket.blockReason}
+                </Typography.Paragraph>
+              )}
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                worker 报告缺失/校验失败将自动退避重试（60/120/240 秒）；达重试上限自动升级为人工卡点，届时再行裁决。
+              </Typography.Text>
+            </Space>
+          </Card>
+        )}
+        {ticket.status === 'BLOCKED' && ticket.pendingLabel !== 'agent' && (
           <BlockedResolutionCard ticket={ticket} onChanged={() => reload()} />
         )}
 
