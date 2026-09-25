@@ -50,8 +50,8 @@ export type TicketListQuery = { status?: Status; type?: TicketType; workspaceId?
 /** POST /api/tickets/:id/dependencies 成功响应 */
 export type AddDependencyResponse = { ok: true };
 
-/** GET /api/workers 响应（注册表列表，放行弹层/改派弹层数据源） */
-export type WorkerInfo = { id: string; name: string; protocol: string; capabilities: string[] };
+/** GET /api/workers 响应（注册表列表，放行弹层/改派弹层数据源）；available=聊天可用性（仅 interactive worker 有值） */
+export type WorkerInfo = { id: string; name: string; protocol: string; capabilities: string[]; available?: boolean };
 export type WorkersResponse = WorkerInfo[];
 
 /** POST /api/tickets/:id/transition 请求体（TASK 放行必带 workerId） */

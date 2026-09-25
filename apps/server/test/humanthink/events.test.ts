@@ -122,7 +122,7 @@ describe('镜像落库与幂等【S2b1 技术方案 4】', () => {
     fake.pushEvent(env('session.text.delta', { text: '逐字' }));
     fake.pushEvent({ type: 'session.text.delta', data: { sessionID: 'ses_foreign', text: '外来' } });
     await vi.waitFor(() => expect(frames).toHaveLength(1));
-    expect(frames[0]).toEqual({ event: { type: 'text.delta', text: '逐字' } });
+    expect(frames[0]).toEqual({ event: { type: 'text.delta', text: '逐字', timestamp: 1000 } });
     expect(rows(db, SID)).toHaveLength(0);
     hub.stop();
   });
@@ -202,7 +202,7 @@ describe('SSE attach：镜像回放 + live 合流【S2b1】', () => {
     const all: SseFrame[] = [];
     hub.attach(SID, 0, (f) => all.push(f));
     expect(all).toHaveLength(2);
-    expect(all[0]).toEqual({ seq: 1, event: { type: 'text.ended', text: 'a' } });
+    expect(all[0]).toEqual({ seq: 1, event: { type: 'text.ended', text: 'a', timestamp: 1 } });
     const tail: SseFrame[] = [];
     hub.attach(SID, 1, (f) => tail.push(f));
     expect(tail).toHaveLength(1);

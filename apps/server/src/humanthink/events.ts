@@ -51,7 +51,7 @@ export type HumanThinkEvent =
   | { type: 'message'; messageId: string; role: 'user' | 'assistant'; text: string };
 
 /** SSE 帧：durable/镜像事件带本地 seq，delta 帧无 seq（断线以最后 durable seq 为 after 重连） */
-export type SseFrame = { seq?: number; event: HumanThinkEvent };
+export type SseFrame = { seq?: number; event: HumanThinkEvent & { timestamp?: number } };
 
 /** serve 全局流信封（探针实证：{id, created, type, location?, data, durable?}） */
 type ServeEnvelope = {
@@ -564,13 +564,13 @@ export class EventHub {
     }
     set.add(onFrame);
     const rows = this.deps.db
-      .select({ seq: humanthinkEvents.seq, payload: humanthinkEvents.payload })
+      .select({ seq: humanthinkEvents.seq, payload: humanthinkEvents.payload, createdAt: humanthinkEvents.createdAt })
       .from(humanthinkEvents)
       .where(and(eq(humanthinkEvents.sessionId, sessionId), sql`${humanthinkEvents.seq} > ${after}`))
       .orderBy(humanthinkEvents.seq)
       .all();
     for (const r of rows) {
-      send({ seq: r.seq, event: JSON.parse(r.payload) as HumanThinkEvent });
+      send({ seq: r.seq, event: { ...(JSON.parse(r.payload) as HumanThinkEvent), timestamp: r.createdAt } });
     }
     return () => {
       set!.delete(onFrame);
@@ -578,10 +578,15 @@ export class EventHub {
     };
   }
 
-  /** live 帧分发：直推已 attach 的监听器（无订阅者时丢弃——delta 可丢，durable 有镜像兜底） */
+  /** live 帧分发：直推已 attach 的监听器（无订阅者时丢弃——delta 可丢，durable 有镜像兜底）；live 帧补时间戳（durable 镜像行有 createdAt，live 无行） */
   private forward(sessionId: string, frame: SseFrame): void {
     const set = this.listeners.get(sessionId);
-    if (set != null) for (const fn of set) fn(frame);
+    if (set != null)
+      for (const fn of set)
+        fn({
+          ...frame,
+          event: { ...frame.event, timestamp: frame.event.timestamp ?? this.now() },
+        });
   }
 }
 

@@ -145,6 +145,21 @@ describe('humanthink 9 端点契约【S2b1】', () => {
     // 已删会话不出列表（即使文本命中）
     const byGone = (await ctx.app.inject({ method: 'GET', url: '/api/humanthink/sessions?q=紫' })).json() as { items: unknown[] };
     expect(byGone.items).toHaveLength(0);
+    // 已删枚举入口（块间对账：web「已删除」查看入口依赖 deleted=1）
+    const deletedOnly = (await ctx.app.inject({ method: 'GET', url: '/api/humanthink/sessions?deleted=1' })).json() as { items: Array<{ id: string; deletedAt: number | null }> };
+    expect(deletedOnly.items.map((i) => i.id)).toEqual([s2.session.id]);
+    expect(deletedOnly.items[0]!.deletedAt).not.toBeNull();
+    await ctx.app.close();
+  });
+
+  test('workers 透出聊天可用性 available（块间对账：web 建会话弹窗过滤依据）', async () => {
+    const ctx = createHtContext();
+    await ctx.start();
+    const res = await ctx.app.inject({ method: 'GET', url: '/api/workers' });
+    const workers = res.json() as Array<{ id: string; capabilities: string[]; available?: boolean }>;
+    const oc = workers.find((w) => w.id === 'oc');
+    expect(oc?.capabilities).toContain('interactive');
+    expect(oc?.available).toBe(true);
     await ctx.app.close();
   });
 

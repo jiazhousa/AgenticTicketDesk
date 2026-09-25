@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, like, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, isNull, like, sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { isInteractiveServeCompatible } from '@atd/worker-core';
@@ -71,6 +71,8 @@ const emptyAsUndefined = <T extends z.ZodType>(schema: T) =>
 const listQuery = z.object({
   workspaceId: emptyAsUndefined(z.string()).optional(),
   q: emptyAsUndefined(z.string()).optional(),
+  /** 已删会话枚举（「已删除」查看入口）：1/true=仅已删；缺省/0=仅活跃（三分语义） */
+  deleted: emptyAsUndefined(z.enum(['1', '0', 'true', 'false'])).optional(),
 });
 
 const eventsQuery = z.object({ after: z.coerce.number().int().min(0).default(0) });
@@ -155,13 +157,17 @@ export function registerHumanThinkRoutes(
   app.get('/api/humanthink/sessions', async (req) => {
     assertAvailable();
     const q = parse(listQuery, req.query);
+    const showDeleted = q.deleted === '1' || q.deleted === 'true';
+    const deletedFilter = showDeleted
+      ? isNotNull(humanthinkSessions.deletedAt)
+      : isNull(humanthinkSessions.deletedAt);
     const rows = db
       .select()
       .from(humanthinkSessions)
       .where(
         q.workspaceId != null
-          ? and(isNull(humanthinkSessions.deletedAt), eq(humanthinkSessions.workspaceId, q.workspaceId))
-          : isNull(humanthinkSessions.deletedAt),
+          ? and(deletedFilter, eq(humanthinkSessions.workspaceId, q.workspaceId))
+          : deletedFilter,
       )
       .orderBy(desc(humanthinkSessions.lastActiveAt))
       .all();
