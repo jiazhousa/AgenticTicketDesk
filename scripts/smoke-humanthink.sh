@@ -154,4 +154,70 @@ assert any(t.strip() for t in texts), "全部 assistant 消息均无 text 分段
 print("   ③ message 端点形态（user/assistant/content.text + cursor）✓")
 ' || fail "message 形态断言失败"
 
-echo "SMOKE PASS ✅（serve/会话/prompt/事件信封/硬拒/message 形态全部符合）"
+echo "   ③ message 端点形态（user/assistant/content.text + cursor）✓"
+
+# ---- 断言④（质量门 r1 补）：视野内绝对路径读主仓不误拒（external_directory 豁免面）----
+echo "== [5/6] 视野内绝对路径读（规则③豁免，不误拒）"
+echo "smoke-marker-ok" > "$SESSION_DIR/marker.txt"
+ABS_SID="$(curl -s -u "$AUTH" -X POST "http://127.0.0.1:$PORT/api/session" \
+  -H "Content-Type: application/json" -H "x-opencode-directory: $SESSION_DIR" \
+  -d "{\"agent\":\"atd-ht-smoke\",\"location\":{\"directory\":\"$SESSION_DIR\"},\"title\":\"abs-read\"}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["id"])')" || fail "绝对读会话创建失败"
+# 先起订阅（后台）再发 prompt；工具名仅在 tool.input.started（name 字段），成功判定=同 callID 的 tool.success 且内容含 marker
+( timeout 75 curl -s -N -u "$AUTH" "http://127.0.0.1:$PORT/api/event" -H "x-opencode-directory: $SESSION_DIR" \
+    > "$WORK/abs-events.log" 2>&1 ) &
+ABS_CAP_PID=$!
+sleep 2
+curl -s -u "$AUTH" -X POST "http://127.0.0.1:$PORT/api/session/$ABS_SID/prompt" \
+  -H "Content-Type: application/json" -H "x-opencode-directory: $SESSION_DIR" \
+  -d "$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "请用 read 工具按绝对路径读取 $SESSION_DIR/marker.txt 文件并原样告诉我内容。")" > /dev/null || fail "绝对读 prompt 失败"
+wait "$ABS_CAP_PID" || true
+python3 - "$WORK/abs-events.log" <<'PYEOF'
+import json, sys
+name_by_call: dict[str, str | None] = {}
+ok = False
+denied = False
+for line in open(sys.argv[1]):
+    if not line.startswith("data: "):
+        continue
+    try:
+        d = json.loads(line[6:])
+    except Exception:
+        continue
+    data = d.get("data", {})
+    t = d.get("type", "")
+    if t == "session.tool.input.started":
+        name_by_call[data.get("id", "")] = data.get("name")
+    if t == "session.tool.failed" and "permission.rejected" in json.dumps(data):
+        denied = True
+    if t == "session.tool.success" and name_by_call.get(data.get("id", "")) == "read":
+        if "marker.txt" in json.dumps(data.get("content", []), ensure_ascii=False):
+            ok = True
+if not ok:
+    print("SMOKE FAIL: 视野内绝对路径读未成功" + ("（被误判为越界拒）" if denied else "（无 read 成功回执）"))
+    sys.exit(1)
+print("   ④ 视野内绝对路径读成功（无误拒）✓")
+PYEOF
+
+# ---- 断言⑤（质量门 r1 补）：经 ATD API 的腿——ServeManager 真实 spawn（env 合并类缺陷在此暴露）----
+echo "== [6/6] 经 ATD API 全链（ServeManager spawn → /api/humanthink/sessions 非 503）"
+ATD_PORT=3001
+if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$ATD_PORT/api/tickets"; then
+  fail "端口 $ATD_PORT 已被占用（停掉在跑的 ATD 实例后重试冒烟）"
+fi
+ATD_LOG="$WORK/atd-server.log"
+( cd "$ROOT" && pnpm -F @atd/server start > "$ATD_LOG" 2>&1 ) &
+ATD_PID=$!
+READY=""
+for _ in $(seq 1 60); do
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "http://127.0.0.1:$ATD_PORT/api/humanthink/sessions" || true)
+  if [ "$CODE" = "200" ]; then READY="1"; break; fi
+  # 503=serve 未就绪/降级——继续等（spawn+健康探测需要数秒）；其余非 503/200 视为异常继续观察
+  sleep 2
+done
+kill "$ATD_PID" 2>/dev/null || true
+sleep 1
+[ -n "$READY" ] || fail "ATD API 腿未就绪（humanthink 503 或未起——查 $ATD_LOG；典型根因：spawn env 未合并致 ENOENT）"
+echo "   ⑤ ATD API 全链 200（ServeManager 真实 spawn 通过）✓"
+
+echo "SMOKE PASS ✅（serve/会话/prompt/事件信封/硬拒/message 形态/视野内绝对读/ATD API 全链）"

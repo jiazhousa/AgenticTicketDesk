@@ -320,10 +320,19 @@ export interface HumanThinkSessionListResponse {
   items: HumanThinkSession[];
 }
 
+/** 镜像行信封（GET /api/humanthink/sessions/:id 详情 events 数组项——server 序列化形态） */
+export interface HumanThinkMirrorRow {
+  seq: number;
+  serveSeq: number | null;
+  type: string;
+  event: HumanThinkEvent;
+  createdAt: number;
+}
+
 /** GET /api/humanthink/sessions/:id 响应（详情内嵌只读历史事件——已删会话历史的唯一读通道） */
 export interface HumanThinkSessionDetailResponse {
   session: HumanThinkSession;
-  events: HumanThinkEvent[];
+  events: HumanThinkMirrorRow[];
 }
 
 /** 待审权限请求项（GET .../:id/permission/requests 列表项，items=当前待审集合） */

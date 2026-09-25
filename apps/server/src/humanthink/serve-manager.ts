@@ -104,9 +104,11 @@ export class ServeManager {
     const argv = this.deps.commandTemplate.map((token) => token.replaceAll('{port}', String(port)));
     this.password = randomBytes(24).toString('hex');
     const env: Record<string, string> = {
+      // 合并宿主环境（PATH 等）——不合并则子进程无 PATH，opencode 若仅装在用户目录（如 ~/.opencode/bin）必然 ENOENT
+      ...process.env,
       OPENCODE_SERVER_PASSWORD: this.password,
       OPENCODE_CONFIG_DIR: this.deps.configDir,
-    };
+    } as Record<string, string>;
     const spawnFn = this.deps.spawnImpl ?? ((argv, o) => spawn(argv[0], argv.slice(1), { ...o, detached: true, stdio: 'ignore' }));
     let child: ChildProcess;
     try {
@@ -115,6 +117,10 @@ export class ServeManager {
       this.log(`serve spawn 失败：${(err as Error).message}`);
       return false;
     }
+    // exec 失败（如 ENOENT）是异步 'error' 事件且 pid 为空——pid 检查前必须先挂监听，否则未捕获异常
+    child.on('error', (err) => {
+      this.log(`serve 子进程 error 事件：${(err as Error).message}`);
+    });
     if (child.pid == null) {
       this.log('serve spawn 未获得 pid（命令不存在或无执行权限）');
       return false;

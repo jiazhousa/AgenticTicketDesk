@@ -15,6 +15,7 @@ import {
 import { ApiError, getWorkers, listWorkspaces } from '../api/tickets';
 import type {
   HumanThinkEvent,
+  HumanThinkMirrorRow,
   HumanThinkPermissionRequest,
   HumanThinkSession,
   WorkerInfo,
@@ -93,7 +94,7 @@ function toChatItems(events: HumanThinkEvent[], pendingPerms: HumanThinkPermissi
       case USER_PROMPT:
         items.push({ kind: 'message', key: `m-${msgId++}`, role: 'user', text: ev.text ?? '', streaming: false });
         break;
-      case 'session.text.delta':
+      case 'text.delta':
         if (openMessage == null) {
           openMessage = { kind: 'message', key: `m-${msgId++}`, role: 'assistant', text: '', streaming: true };
           items.push(openMessage);
@@ -124,7 +125,7 @@ function toChatItems(events: HumanThinkEvent[], pendingPerms: HumanThinkPermissi
           openReasoning.streaming = true;
         }
         break;
-      case 'session.reasoning.delta':
+      case 'reasoning.delta':
         if (openReasoning == null) {
           openReasoning = { kind: 'reasoning', key: `r-${reasoningId++}`, text: '', streaming: true };
           items.push(openReasoning);
@@ -271,7 +272,9 @@ export default function HumanThinkPage() {
   /** SSE 初始游标（详情镜像最大 seq；订阅时一次性捕获） */
   const initialAfterRef = useRef<number | undefined>(undefined);
 
-  const resetFromMirror = useCallback((mirror: HumanThinkEvent[]) => {
+  /** 详情镜像行信封解包：拍平为与 SSE 帧一致的形态（{...event, seq, timestamp}），seq 去重与游标逻辑共用 */
+  const resetFromMirror = useCallback((rows: HumanThinkMirrorRow[]) => {
+    const mirror = rows.map((r) => ({ ...r.event, seq: r.seq, timestamp: r.createdAt }) as HumanThinkEvent);
     setEvents(mirror);
     seenSeqRef.current = new Set(mirror.filter((e) => typeof e.seq === 'number').map((e) => e.seq as number));
     initialAfterRef.current = mirror.reduce<number | undefined>(

@@ -29,6 +29,8 @@ describe('ServeManager 生命周期【S2b1 技术方案 1】', () => {
         expect(argv[3]).toMatch(/^49\d\d$/);
         expect(opts.env.OPENCODE_SERVER_PASSWORD).toMatch(/^[0-9a-f]{48}$/);
         expect(opts.env.OPENCODE_CONFIG_DIR).toBe('/tmp/htcfg');
+        // 环境合并（质量门 r1-c1）：子进程必须继承宿主 PATH——opencode 装在用户目录时缺 PATH 必然 ENOENT
+        expect(opts.env.PATH).toBe(process.env.PATH);
         children.push(child);
         return child;
       },
