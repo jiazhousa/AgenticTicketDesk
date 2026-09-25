@@ -1,7 +1,7 @@
 # Spec: S3 并行执行与排队/自愈引擎
 
 - **topic**：atd-s3-parallel-retry
-- **状态**：v3（r1 审查修订：排队载体改 SPEC_READY 元数据、唤醒面全终态覆盖、契约载体补全；待 r2 审查）
+- **状态**：v3.1（r2 审查 PASS 87 残余闭合：闸门 user 通道口径/交叉引用/冻结时机/清空时机/偏离补录；待用户放行）
 - **日期**：2026-09-25（v1 草案 / v2 澄清收敛 / v3 r1 修订）
 - **上游**：Epic `agentic-ticket-desk` §4.2/§9；S2a/S2w1 已交付
 - **澄清记录**（2026-09-25 用户拍板）：① 依赖等待维持 SPEC_READY（对 Epic §4.2 显式收紧）② preSpawnFail 维持 CANCELLED 不纳入重试 ③ plannedFiles「可选声明+实测兜底」双防线 ④ 指数退避 60/120/240
@@ -10,6 +10,8 @@
   2. 资源排队（闸门）与文件冲突排队以 **SPEC_READY + queue 元数据**承载，不进 BLOCKED（r1-F1 修订：与偏离 1 同族——「未放行等待」与「执行中受阻」分离；pending:agent 仅 RETRY_WAIT 使用，状态机零新增边）
   3. system 通道（编排链自动放行）文件集相交从「被拒」改为「排队」（user 通道仍 422 拒绝，与 Epic §9 验收一致）
   4. worktree 预建池化裁剪（allocate 复用 S2a 已有）
+  5. Epic §5 pending:agent 恢复边为 →IN_PROGRESS，本 spec 为 →DISPATCHED（恢复=重走放行链重新 spawn）
+  6. Epic §9 S2a/S3 行「升级 BLOCKER」为内联化前陈旧措辞（现语义=BLOCKED(pending:l3)；Epic 该两处待随修订同步）
 
 ## 背景
 
@@ -21,11 +23,11 @@ S2a/S2w1 交付了单发执行闭环。当前缺口：多单同时放行无治�
 
 **做**：
 
-- `plannedFiles` 可选声明：submitSpec 请求体扩为 `{specContent, plannedFiles?}`；落 `tickets.planned_files`（TEXT，JSON 数列，可空）；随快照冻结（DRAFT 重提可改，SPEC_READY 后不可）
-- 前置校验（声明 vs 声明）：放行时与同 repo **文件集占用集**（见业务规则 4）中已声明单两两相交检测；user 通道 422 FILE_SET_CONFLICT；system 通道排队
+- `plannedFiles` 可选声明：submitSpec 请求体扩为 `{specContent, plannedFiles?}`；落 `tickets.planned_files`（TEXT，JSON 数列，可空）；随 submitSpec 提交冻结（与 specContent 同一入口同一时机；DRAFT 期可反复编辑不涉冻结，SPEC_READY 后不可改）
+- 前置校验（声明 vs 声明）：放行时与同 repo **文件集占用集**（见业务规则 2）中已声明单两两相交检测；user 通道 422 FILE_SET_CONFLICT；system 通道排队
 - 排队承载：`tickets.queued_reason`（TEXT：GATE_QUEUED / FILE_CONFLICT）+ `queued_at`（INTEGER epoch）；工单保持 SPEC_READY，不入 BLOCKED
 - settle 实测防线：DONE settle 从基线 diff 提取实际改动文件落 `ticket_files` 表；与文件集占用集中单的声明集交叉比对，相交 → 双方 system 留言预警（不改状态不阻塞）
-- 并发闸门：per-repo `maxConcurrentPerRepo`（config.yaml，默认 2）——同仓**闸门计数集**达限即排队（FIFO 按 queued_at）
+- 并发闸门：per-repo `maxConcurrentPerRepo`（config.yaml，默认 2）——同仓**闸门计数集**达限即排队（FIFO 按 queued_at；**两通道一律排队**，user 放行不报错、单入队）
 - `BLOCKED(pending:agent)` 自愈引擎（仅 RETRY_WAIT）：进入/倒计时/恢复/上限升级 l3；重启恢复
 - 卡点与排队 UI：工作台「待处理」区显示排队单（原因徽标+排队时刻）；「阻塞与待裁决」区 BLOCKED 分 pending:l3（裁决三选）/ pending:agent-RETRY_WAIT（只读：次数/下次唤醒倒计时）；列表页徽标区分
 - DB migration 0004：`tickets` +`retry_count`（INTEGER NOT NULL DEFAULT 0）+`retry_at`（INTEGER 可空）+`planned_files`（TEXT 可空）+`queued_reason`（TEXT 可空）+`queued_at`（INTEGER 可空）；新表 `ticket_files`（ticket_id, round, path，UNIQUE(ticket_id, round, path)）
@@ -56,7 +58,7 @@ S2a/S2w1 交付了单发执行闭环。当前缺口：多单同时放行无治�
 
 1. **plannedFiles 语义**：相对 repoRef 路径；`dir/` 尾斜杠=递归包含；空数组视同未声明；匹配函数单一实现双向复用（声明 vs 声明、实测 vs 声明）
 2. **两个集合**：**闸门计数集** = 同 repo 的 DISPATCHED+IN_PROGRESS（排队与 BLOCKED 不占闸门——未在执行）；**文件集占用集** = 同 repo 的 DISPATCHED+IN_PROGRESS+SPEC_READY 排队中+BLOCKED（非终态都保留其声明占用，防卡点单恢复后与后来者冲突）
-3. **排队生命周期**：进入（放行时闸门满/文件冲突且 system 通道）→ 挂起（SPEC_READY + queued_reason/queued_at，放行请求不报错）→ 唤醒（触发面见规则 5）→ 重走完整放行前置链（闸门+文件集复校验），仍不满足则重新排队（保持原 queued_at 维持 FIFO 位）
+3. **排队生命周期**：进入（闸门满——两通道一律；文件冲突——仅 system 通道排队，user 通道 422 拒绝）→ 挂起（SPEC_READY + queued_reason/queued_at，放行请求不报错）→ 唤醒（触发面见规则 5）→ 重走完整放行前置链（闸门+文件集复校验），仍不满足则重新排队（保持原 queued_at 维持 FIFO 位）；排队字段在成功放行（DISPATCHED）或取消（CANCELLED）时清空；UI 待处理区对排队单不显示放行按钮、显示排队徽标（原因+时刻）
 4. **排队不计入 retryCount**（retryCount 仅 RETRY_WAIT 自愈失败计数）；排队无上限——占用集单必经终态或 BLOCKED，BLOCKED 经人裁决必回执行或终态，无环
 5. **唤醒触发面（单入口收敛）**：任何离开 {DISPATCHED, IN_PROGRESS} 的转移（settle 三终态 + 入 BLOCKED）与 server 启动恢复扫描，统一触发队列重校验；实现挂载点 `onTicketSettled` 扩展为全路径 + BLOCKED 转移钩子
 6. **RETRY_WAIT 引擎**：报告缺失/schema 错 → IN_PROGRESS→BLOCKED（pendingLabel='agent'——`ticket-service.ts` 现硬编码 'l3' 处参数化，user 通道语义不变）；retry_at=now+60×2^retry_count（封顶 240）；到点 BLOCKED→DISPATCHED 重 spawn（round+1）；retry_count 达 maxRetries → 留 BLOCKED 改 pendingLabel='l3' + blockReason 记录历次摘要；周期扫描 5s tick，幂等
