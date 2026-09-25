@@ -54,7 +54,11 @@ const patchBody = z
   })
   .refine((v) => Object.values(v).some((x) => x !== undefined), { message: '至少提供一个字段' });
 
-const specBody = z.object({ specContent: z.string().min(1, 'spec 内容不能为空') });
+const specBody = z.object({
+  specContent: z.string().min(1, 'spec 内容不能为空'),
+  /** 声明文件集（相对 repoRef 路径；`dir/` 尾斜杠=目录递归）；随本入口冻结，空数组视同未声明 */
+  plannedFiles: z.array(z.string().min(1, '文件路径不能为空')).optional(),
+});
 
 const transitionBody = z.object({
   to: z.enum(TICKET_STATUSES),
@@ -118,11 +122,11 @@ export function registerTicketRoutes(
     return service.updateTicket(id, body);
   });
 
-  // POST /api/tickets/:id/spec —— 提交 spec（写快照 + 冻结转 SPEC_READY）
+  // POST /api/tickets/:id/spec —— 提交 spec（写快照+声明文件集 + 冻结转 SPEC_READY）
   app.post('/api/tickets/:id/spec', async (req) => {
     const { id } = parse(idParams, req.params);
     const body = parse(specBody, req.body);
-    return service.submitSpec(id, body.specContent);
+    return service.submitSpec(id, body.specContent, body.plannedFiles);
   });
 
   // POST /api/tickets/:id/transition —— 状态转移（人工通道；TASK 放行触发自动派发）

@@ -59,8 +59,20 @@ export type TestContext = {
  * （放行只走校验不触发 spawn，时序确定）。需真实执行/真实仓库的用例用 createRealContext。
  * workspaceSpecs 可注入多 workspace fixture（跨域/跨仓用例）。
  */
+/**
+ * 每用例独立内存库 + 服务 + app 三合一上下文。
+ * S3 并发治理三键（maxConcurrentPerRepo/maxRetries/retryBackoffSec）与 dispatcher 时序
+ * （tickIntervalMs/now）经 opts 注入透传，缺省与 config.yaml 缺省一致。
+ */
 export function createTestContext(
-  opts: { workspaceSpecs?: WorkspaceSpec[] } = {},
+  opts: {
+    workspaceSpecs?: WorkspaceSpec[];
+    maxConcurrentPerRepo?: number;
+    maxRetries?: number;
+    retryBackoffSec?: number;
+    tickIntervalMs?: number;
+    now?: () => number;
+  } = {},
 ): TestContext {
   const db = createDatabase(':memory:');
   const registry = loadRegistry(FIXTURE_WORKERS_DIR);
@@ -73,7 +85,9 @@ export function createTestContext(
   const config: AppConfig = {
     dataDir: mkdtempSync(path.join(tmpdir(), 'atdt-')),
     defaultTimeoutMin: 5,
-    retryOnReportMiss: 1,
+    maxConcurrentPerRepo: opts.maxConcurrentPerRepo ?? 2,
+    maxRetries: opts.maxRetries ?? 3,
+    retryBackoffSec: opts.retryBackoffSec ?? 60,
   };
   const { app, runtime, worktree } = buildServer(db, {
     config,
@@ -81,6 +95,8 @@ export function createTestContext(
     workspaces,
     autoDispatch: false,
     worktreeGuard: 'skip',
+    tickIntervalMs: opts.tickIntervalMs,
+    now: opts.now,
   });
   return {
     db,
@@ -127,6 +143,8 @@ export function writeFixtureProfile(
 /**
  * 真实编排上下文：临时 git 仓 + 临时 dataDir + 自定义 profile 集 + worktree 前置校验真实生效。
  * autoDispatch 缺省关闭（校验型用例）；dispatcher.test 显式开启。
+ * S3 并发治理三键与 dispatcher 时序同 createTestContext 透传；
+ * profile command 可携带额外实参（双并行 fake worker 以命令行参数区分独立实例，见 fake-done-arg.mjs）。
  * extraRepos 为 atd workspace 追加 readable 仓（跨仓真跑用例：主仓=repoPath）。
  */
 export function createRealContext(
@@ -134,10 +152,14 @@ export function createRealContext(
     profiles?: Array<{ id: string; command: string; timeoutMin?: number }>;
     autoDispatch?: boolean;
     timeoutOverrideMs?: number;
-    retryOnReportMiss?: number;
     repoPath?: string;
     dataDir?: string;
     extraRepos?: Array<{ id: string; path: string }>;
+    maxConcurrentPerRepo?: number;
+    maxRetries?: number;
+    retryBackoffSec?: number;
+    tickIntervalMs?: number;
+    now?: () => number;
   } = {},
 ): TestContext {
   const db = createDatabase(':memory:');
@@ -164,12 +186,16 @@ export function createRealContext(
     config: {
       dataDir,
       defaultTimeoutMin: 5,
-      retryOnReportMiss: opts.retryOnReportMiss ?? 1,
+      maxConcurrentPerRepo: opts.maxConcurrentPerRepo ?? 2,
+      maxRetries: opts.maxRetries ?? 3,
+      retryBackoffSec: opts.retryBackoffSec ?? 60,
     },
     registry,
     workspaces,
     autoDispatch: opts.autoDispatch ?? false,
     timeoutOverrideMs: opts.timeoutOverrideMs,
+    tickIntervalMs: opts.tickIntervalMs,
+    now: opts.now,
   });
   return {
     db,

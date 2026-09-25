@@ -23,7 +23,8 @@ try {
 const db = createDatabase(path.join(import.meta.dirname, '..', 'data', 'atd.db'));
 const { app, runtime } = buildServer(db, { config, registry, workspaces });
 
-// 服务重启恢复：消亡进程对应的执行单收敛（IN_PROGRESS→FAILED / DISPATCHED→CANCELLED）
+// 服务重启恢复（仍在监听前完成）：消亡进程对应的执行单收敛（IN_PROGRESS→FAILED / DISPATCHED→CANCELLED）+
+// RETRY_WAIT 到期单立即恢复（计时器由 tick 重建）+ 排队单重校验一轮
 runtime.dispatcher.recoverOnStartup();
 
 const port = Number(process.env.PORT ?? 3001);

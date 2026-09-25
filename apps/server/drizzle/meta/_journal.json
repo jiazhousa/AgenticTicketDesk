@@ -29,6 +29,13 @@
       "when": 1790231576968,
       "tag": "0003_s2w1_blocker_inline",
       "sqliterules": []
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1790338869719,
+      "tag": "0004_s3_parallel",
+      "breakpoints": true
     }
   ]
 }
