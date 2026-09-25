@@ -242,7 +242,7 @@ export function registerHumanThinkRoutes(
     const res = await ht.facade.prompt(id, body.text);
     // 用户消息即时落历史行（messageId 幂等；对账时自动去重）——「不丢话」双保险
     ht.events.insertUserMessage(id, res.messageId, body.text);
-    return { admitted: true };
+    return { admitted: true, messageId: res.messageId };
   });
 
   app.post('/api/humanthink/sessions/:id/interrupt', async (req) => {

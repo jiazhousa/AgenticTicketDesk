@@ -357,6 +357,8 @@ export interface HumanThinkPermissionReplyRequest {
 /** prompt 响应（消息已受理，回复经事件流返回） */
 export interface HumanThinkPromptResponse {
   admitted: true;
+  /** serve 侧用户消息 id（SSE 镜像行按此幂等；回显去重依据） */
+  messageId: string;
 }
 
 /** interrupt / delete / reply 共用 `{ ok: true }` 响应 */
@@ -369,6 +371,8 @@ export interface HumanThinkOkResponse {
  * durable 帧带 seq（断线重连游标）；delta 帧无 seq（不重放，UI 以镜像全文对齐）。
  */
 export type HumanThinkEventType =
+  /** 镜像 message 行：用户消息主源（prompt 落行+SSE 转发）与对账 assistant 兜底（载荷 messageId/role/text） */
+  | 'message'
   /** 助手消息全文（镜像主源，载荷 text） */
   | 'text.ended'
   | 'reasoning.started'
@@ -386,9 +390,9 @@ export type HumanThinkEventType =
   | 'permission_request'
   /** ATD 自有：审批裁决落镜像 */
   | 'permission_resolved'
-  /** 以下为 live 转发帧（不落镜像、不重放） */
-  | 'session.text.delta'
-  | 'session.reasoning.delta';
+  /** 以下为 live 转发帧（不落镜像、不重放）——短名，与 server 产物一致 */
+  | 'text.delta'
+  | 'reasoning.delta';
 
 /**
  * HumanThink 事件（humanthink_events 行/转发帧的 API 形态；字段按 UI 消费最小集宽松展开，
@@ -400,10 +404,12 @@ export interface HumanThinkEvent {
   seq?: number;
   /** 事件时间戳（毫秒，字段缺失时不展示时间） */
   timestamp?: number;
-  /** text.ended / reasoning.ended / session.*.delta：文本全文或增量 */
+  /** text.ended / reasoning.ended / text.delta / reasoning.delta：文本全文或增量 */
   text?: string;
-  /** 对账行若携带角色信息，user 消息渲染为用户气泡（镜像不含用户消息型，此为防御位） */
+  /** message 行角色（user=用户气泡，assistant=对账兜底渲染） */
   role?: 'user' | 'assistant';
+  /** message 行：serve 侧消息 id（回显去重依据） */
+  messageId?: string;
   /** tool.*：工具名 */
   tool?: string;
   /** permission.* / permission_request / permission_resolved：审批请求 id */

@@ -34,8 +34,6 @@ import ApprovalCard, { type ApprovalState } from '../components/chat/ApprovalCar
 const PERM_POLL_MS = 2000;
 /** antd Header 默认高度（页面满高布局扣减） */
 const HEADER_H = 64;
-/** 本地回显伪事件 type（镜像值域不含用户消息型，仅存活于当前页面会话） */
-const USER_PROMPT = 'user.prompt';
 
 /* ==================== 事件流 → 聊天视图模型 ==================== */
 
@@ -89,11 +87,25 @@ function toChatItems(events: HumanThinkEvent[], pendingPerms: HumanThinkPermissi
     if (target != null) target.state = state;
   };
 
+  const seenMessageIds = new Set<string>();
   for (const ev of events) {
     switch (ev.type) {
-      case USER_PROMPT:
-        items.push({ kind: 'message', key: `m-${msgId++}`, role: 'user', text: ev.text ?? '', streaming: false });
+      case 'message': {
+        // 镜像 message 行：用户消息主源（prompt 落行+SSE 转发）与对账 assistant 兜底；messageId 去重防御
+        const mid = ev.messageId;
+        if (mid != null) {
+          if (seenMessageIds.has(mid)) break;
+          seenMessageIds.add(mid);
+        }
+        items.push({
+          kind: 'message',
+          key: mid != null ? `m-${mid}` : `m-${msgId++}`,
+          role: ev.role === 'assistant' ? 'assistant' : 'user',
+          text: ev.text ?? '',
+          streaming: false,
+        });
         break;
+      }
       case 'text.delta':
         if (openMessage == null) {
           openMessage = { kind: 'message', key: `m-${msgId++}`, role: 'assistant', text: '', streaming: true };
@@ -434,8 +446,6 @@ export default function HumanThinkPage() {
     const text = input.trim();
     if (text === '' || session == null || readOnly || sending) return;
     setSending(true);
-    // 本地回显（镜像值域不含用户消息型，刷新后仅存助手侧历史）
-    setEvents((prev) => [...prev, { type: USER_PROMPT, text }]);
     setInput('');
     try {
       await promptHtSession(session.id, text);

@@ -198,7 +198,7 @@ describe('humanthink 9 端点契约【S2b1】', () => {
     const s = (await ctx.app.inject({ method: 'POST', url: '/api/humanthink/sessions', payload: { workerId: 'oc', workspaceId: 'atd' } })).json() as { session: { id: string } };
     const p = await ctx.app.inject({ method: 'POST', url: `/api/humanthink/sessions/${s.session.id}/prompt`, payload: { text: '帮我看下目录结构' } });
     expect(p.statusCode).toBe(200);
-    expect(p.json()).toEqual({ admitted: true });
+    expect(p.json()).toEqual({ admitted: true, messageId: 'msg_test_1' });
     const promptReq = ctx.fake.requests.find((r) => r.path.endsWith('/prompt'));
     expect(promptReq?.body).toEqual({ text: '帮我看下目录结构' });
     const i = await ctx.app.inject({ method: 'POST', url: `/api/humanthink/sessions/${s.session.id}/interrupt` });

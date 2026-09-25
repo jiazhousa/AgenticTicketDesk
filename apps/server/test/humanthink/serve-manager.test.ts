@@ -120,6 +120,33 @@ describe('ServeManager 生命周期【S2b1 技术方案 1】', () => {
     mgr.stop();
   });
 
+  test('spawn 返回无 pid + 稍后异步 error 事件（Node ENOENT 真实形态）→ 吞掉异步错误不未捕获，走失败路径', async () => {
+    let spawned = 0;
+    const mgr = new ServeManager({
+      commandTemplate: ['opencode', 'serve', '--port', '{port}'],
+      configDir: '/d', cwd: '/d', startPort: 4900,
+      spawnImpl: () => {
+        spawned += 1;
+        if (spawned === 1) {
+          // 首次：pid 为空（exec 解析失败），error 事件在 pid 检查之后异步到达
+          const bad = new EventEmitter() as ChildProcess;
+          Object.assign(bad, { pid: undefined, exitCode: null, kill: () => true, stdio: [null, null, null] });
+          queueMicrotask(() => bad.emit('error', new Error('spawn opencode ENOENT')));
+          return bad;
+        }
+        return fakeChild();
+      },
+      fetchImpl: (async () => httpJson({ data: [] })) as typeof fetch,
+      restartBackoffMs: [5],
+      healthTimeoutMs: 100,
+    });
+    // 异步 error 若未被吞，process 级 uncaught 会使测试进程崩——跑完即证明兜底成立
+    await expect(mgr.start()).resolves.toBe('degraded');
+    expect(spawned).toBeGreaterThanOrEqual(1);
+    await new Promise((r) => setTimeout(r, 10));
+    mgr.stop();
+  });
+
   test('端口占用递补：起始端口被占时取下一个空闲', async () => {
     const { probeFreePort } = await import('../../src/humanthink/serve-manager.js');
     // 占住一个端口
