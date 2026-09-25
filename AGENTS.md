@@ -14,7 +14,8 @@ apps/server          # Fastify + Drizzle/better-sqlite3：工单域 + 编排（d
 apps/web             # React + Vite + antd：工作台/仪表盘/详情/日志页
 packages/worker-core # worker 注册协议（profile zod + 校验：token/凭据扫描/schema）
 packages/worker-opencode # opencode 适配（事件流解析/进程管理）
-config.yaml          # dataDir（~/.local/share/atd）/超时/重试（repoPath 已不参与装配）
+config.yaml          # dataDir（~/.local/share/atd）/超时/并发闸门与重试（maxConcurrentPerRepo·maxRetries·retryBackoffSec；repoPath 不参与装配、retryOnReportMiss 已废弃仅告警）
+apps/server/drizzle  # migrations 0000-0004（0004=S3：tickets +retry/planned/queued 五列 + ticket_files 实测清单表）
 workspaces/atd.yaml  # workspace 声明式接入（ATD 自吃兼模板；目录缺失/非法声明=启动失败）
 workers/opencode.yaml # worker profile 声明（spawn-cli 协议）
 ```
@@ -39,6 +40,7 @@ DRAFT → SPEC_READY → DISPATCHED → IN_PROGRESS → DONE | BLOCKED | FAILED
 终态(DONE/FAILED/CANCELLED) → DISPATCHED（重开：留言即指令，原 worktree round+1 续跑）
 BLOCKED → IN_PROGRESS | DISPATCHED | FAILED | CANCELLED
 DRAFT/SPEC_READY/DISPATCHED/BLOCKED → CANCELLED（user 边）
+SPEC_READY 排队中（queuedReason 非空）→ CANCELLED 亦触发队列重校验（排队单占文件集，取消即释放占用）
 ```
 - 边表 `TRANSITIONS` + `isUserEdge`（type 分流）双定义，改动必须同步两侧
 - TASK 放行四件套前置：workerId 必填（重开未指定则沿用原绑定）→ ∈Registry → worktree 可建 → repoRef 复校（user 通道漂移 422 REPO_REF_DRIFTED；system 自动放行链不复校，spawn 解析失败走 preSpawnFail→CANCELLED）
@@ -47,7 +49,17 @@ DRAFT/SPEC_READY/DISPATCHED/BLOCKED → CANCELLED（user 边）
 ### 依赖与编排链自动流转
 - `ticket_dependencies`（blockedBy DAG）：环检测在 addDependency
 - **自动放行**：单 DONE 后，下游「有 parent + SPEC_READY + 预绑定 worker + 其余依赖全 DONE」→ system 自动 DISPATCHED 并执行；独立单（无 parent）不自动，保持人工
-- L2 重试：报告缺失/schema 错重试 1 次（round+1）；崩溃/超时直接 FAILED 不重试
+- L2 重试：报告缺失/schema 错进入 RETRY_WAIT 自愈（见下节），崩溃/超时直接 FAILED 不重试
+
+### 排队与并发治理（S3）
+- **闸门计数集** = 同 repo TASK 的 DISPATCHED+IN_PROGRESS（`maxConcurrentPerRepo` 默认 2，超出排队 FIFO）；**文件集占用集** = 前者 + SPEC_READY 排队中 + BLOCKED（非终态保留声明）
+- 排队承载 = 保持 SPEC_READY + `queuedReason`（GATE_QUEUED/FILE_CONFLICT）/`queuedAt`，**不走状态机零新增边**；闸门满两通道一律排队（user 放行不报错），文件冲突 user 422 `FILE_SET_CONFLICT`、system 通道排队；worker_id 早绑定（排队单=四件套已过的「随时可放行」单），重排队保 queuedAt 维持 FIFO 位
+- `plannedFiles`：submitSpec 可选声明（随快照冻结，`dir/` 尾斜杠=递归）；放行时与占用集声明两两不相交校验；DONE settle 实测清单（基线 diff）落 `ticket_files` 并对占用集声明单交叉预警（system 留言，不改状态不阻塞）
+- 唤醒单入口 `releaseAndRecheck`：任何离开执行态的转移（settle 三终态+入 BLOCKED，dispatcher 内直调）+ 三条 user 取消边（DISPATCHED/BLOCKED/SPEC_READY 排队中→CANCELLED，经 service.onInflightReleased 回调）+ 启动扫描，统一触发
+
+### RETRY_WAIT 自愈（S3）
+- 报告缺失/schema 错 → BLOCKED(pending:agent) + retryAt；退避 60/120/240（`retryBackoffSec×2^(n-1)` 封顶 240）**先判后等**——超 `maxRetries`（默认 3）当次升级 pending:l3 + blockReason 历次摘要（system comment，无 transitions 行）
+- 5s tick 到期恢复（闸门满则 retryAt 顺延一 tick；恢复走 actor=system 重 spawn round+1）；continue/reassign/reopen 清零 retryCount
 
 ### Worker spawn（packages/worker-opencode + apps/server/src/dispatcher.ts）
 - worktree：`{dataDir}/worktrees/{repoName}-{workspaceId}-t{id}`（按工单 workspace+repoRef 解析目标仓）、分支 `atd/{workspaceId}-t{id}`（单实例内单号全局唯一；多 ATD 实例共管同仓不在当前定位内）
@@ -64,6 +76,7 @@ DRAFT/SPEC_READY/DISPATCHED/BLOCKED → CANCELLED（user 边）
 4. **权限 catch-all 必须 allow 不是 ask**——无人值守 ask=auto-reject 全拒；deny 后置覆盖（last-match-wins）；OPENCODE_CONFIG_CONTENT 内联注入生效
 5. **opencode 从 worktree 的 .git gitfile 解析主仓当项目根**——shell workdir 错位、commit 落主仓分支；根治=prompt 头部工作目录强约束（buildPrompt 已内置）
 6. **spawn pid 空检查必须在转 IN_PROGRESS 之前**（pre-spawn 失败 CANCELLED 保留可重派语义）
+7. **plannedFiles 声明质量影响放行**——声明 vs 声明是前置校验依据（相交 user 拒 422/system 排队），settle 实测 vs 声明交叉预警；worker 侧无需感知，spec 作者应尽量声明（S2b2 编排 agent 拆单时可强制）
 
 ## 四、代码风格与约定
 
