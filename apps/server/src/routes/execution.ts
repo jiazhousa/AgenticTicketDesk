@@ -23,7 +23,6 @@ const emptyAsUndefined = <T extends z.ZodType>(schema: T) =>
   z.preprocess((v) => (v === '' ? undefined : v), schema);
 
 const idParams = z.object({ id: z.coerce.number().int().positive() });
-const blockerParams = z.object({ blockerId: z.coerce.number().int().positive() });
 
 const logsQuery = z.object({
   round: emptyAsUndefined(z.coerce.number().int().min(0)).optional(),

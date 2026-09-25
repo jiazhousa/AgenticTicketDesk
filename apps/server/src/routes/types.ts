@@ -77,10 +77,10 @@ export type LogsResponse = { round: number; events: UnifiedEvent[] };
 /** DELETE /api/tickets/:id/worktree?keepBranch= 响应（执行中/非终态 422 WORKTREE_ACTIVE） */
 export type ReclaimWorktreeResponse = { ok: true };
 
-/** POST /api/tickets/:blockerId/resolve 请求体与响应 */
-export type ResolveBlockerBody = {
+/** POST /api/tickets/:id/resolve 请求体与响应（卡点裁决，目标即原单 BLOCKED 态） */
+export type ResolveTicketBody = {
   resolution: 'continue' | 'reassign' | 'abort';
   note?: string;
   reassignWorkerId?: string;
 };
-export type ResolveBlockerResponse = { blocker: Ticket; parent: Ticket };
+export type ResolveTicketResponse = { ticket: Ticket };

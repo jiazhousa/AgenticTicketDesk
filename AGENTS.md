@@ -37,7 +37,7 @@ workers/opencode.yaml # worker profile 声明（spawn-cli 协议）
 DRAFT → SPEC_READY → DISPATCHED → IN_PROGRESS → DONE | BLOCKED | FAILED
                       ↑                        ↓
 终态(DONE/FAILED/CANCELLED) → DISPATCHED（重开：留言即指令，原 worktree round+1 续跑）
-BLOCKED → IN_PROGRESS | DISPATCHED | FAILED | CANCELLED | DONE(仅 BLOCKER 型)
+BLOCKED → IN_PROGRESS | DISPATCHED | FAILED | CANCELLED
 DRAFT/SPEC_READY/DISPATCHED/BLOCKED → CANCELLED（user 边）
 ```
 - 边表 `TRANSITIONS` + `isUserEdge`（type 分流）双定义，改动必须同步两侧
@@ -50,7 +50,7 @@ DRAFT/SPEC_READY/DISPATCHED/BLOCKED → CANCELLED（user 边）
 - L2 重试：报告缺失/schema 错重试 1 次（round+1）；崩溃/超时直接 FAILED 不重试
 
 ### Worker spawn（packages/worker-opencode + apps/server/src/dispatcher.ts）
-- worktree：`{dataDir}/worktrees/{目标仓basename}-t{id}`（按工单 workspace+repoRef 解析仓）、分支 `atd/t{id}`（已知限制：多实例单号会撞分支名）
+- worktree：`{dataDir}/worktrees/{repoName}-{workspaceId}-t{id}`（按工单 workspace+repoRef 解析目标仓）、分支 `atd/{workspaceId}-t{id}`（单实例内单号全局唯一；多 ATD 实例共管同仓不在当前定位内）
 - 解单 cwd=目标仓 worktree，**目标仓自身的 AGENTS.md 随 checkout 被 opencode 天然加载**（跨仓 Story 的 Task 链各仓独立取知识）；API：`GET /api/workspaces(/:id)`、列表 `?workspaceId=`、建单 `workspaceId/repoRef`
 - prompt 落 `{dataDir}/prompts/t{id}.r{round}.md`；round>1 注入轮次上下文（前轮报告 + 用户留言）
 - 统一日志 `{dataDir}/logs/t{id}.r{round}.*.jsonl`；worker 产出 `atd-report.json`（done/blocked + summary + commits）
