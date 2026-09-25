@@ -11,3 +11,4 @@
 {"ts":"2026-09-25T20:24:52+08:00","topic":"atd-s2b1-humanthink","from":"SPEC_REVIEWING","to":"SPEC_USER_AUDIT","actor":"审查者"}
 {"ts":"2026-09-25T23:09:20+08:00","topic":"atd-s2b1-humanthink","from":"SPEC_USER_AUDIT","to":"SPEC_APPROVED","actor":"调度者"}
 {"ts":"2026-09-25T23:09:20+08:00","topic":"atd-s2b1-humanthink","from":"SPEC_APPROVED","to":"IMPL_DRAFT","actor":"调度者"}
+{"ts":"2026-09-25T23:20:34+08:00","topic":"atd-s2b1-humanthink","from":"IMPL_DRAFT","to":"IMPL_REVIEWING","actor":"调度者"}
