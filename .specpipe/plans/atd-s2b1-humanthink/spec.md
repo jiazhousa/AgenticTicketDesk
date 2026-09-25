@@ -12,14 +12,14 @@
 
 Epic 定位：聊天框 = worker interactive 会话——选 worker×workspace 对话、流式渲染、产出 spec 草稿（放行链 S2b2）。
 
-契约事实链（r1-r3 逐轮核定的最终口径）：① `opencode serve` 常驻 headless；per-session directory 创建时固化 ② **权限双系统互不通用**：v2 prompt 面（SessionRunner）只消费 **core AgentV2 权限**；session 级 V1 仅 app 工具链 ③ **core 配置是纯文件加载，只读 `OPENCODE_CONFIG_DIR`**（`OPENCODE_CONFIG_CONTENT` 仅 V1 链消费，到不了 core）——动态 agent 的唯一可行载体=私有配置目录+生成 opencode.json（core V2 键形 `agents`）④ **agent 未注册是静默 fail-closed**（不报错→全工具 deny→审批事件永不产生）——载体正确性必须探针先行 ⑤ read 的 resource 为**相对路径**，越界动作=`external_directory`；用户全局顶层 permissions 会前置注入（单向覆盖风险）⑥ 事件分层：per-session SSE（`?after`）仅 durable；delta 与 `permission.v2.*` 仅全局 `GET /api/event`（上游 allBounded(256)，溢出 fail-closed 断流）⑦ v2 面 create 含 agent/location，无 delete（delete 在 instance 面）⑧ location 配置打开时读一次并缓存（serve 生命周期内 workspace 集不变——与「workspace 热更新不做」一致）。
+契约事实链（r1-r3 逐轮核定的最终口径）：① `opencode serve` 常驻 headless；per-session directory 创建时固化 ② **权限双系统互不通用**：v2 prompt 面（SessionRunner）只消费 **core AgentV2 权限**；session 级 V1 仅 app 工具链 ③ **core 配置是纯文件加载，只读 `OPENCODE_CONFIG_DIR`**（`OPENCODE_CONFIG_CONTENT` 仅 V1 链消费，到不了 core）——动态 agent 的唯一可行载体=私有配置目录+生成 opencode.json（core V2 键形 `agents`）④ **agent 未注册是静默 fail-closed**（不报错→全工具 deny→审批事件永不产生）——载体正确性必须探针先行 ⑤ read 的 resource **在主仓内为相对路径、对外部仓为绝对 canonical 路径**，越界动作=`external_directory`（先断言 external_directory 再断言 read）；用户全局顶层 permissions 会前置注入（单向覆盖风险）⑥ 事件分层：per-session SSE（`?after`）仅 durable；delta 与 `permission.v2.*` 仅全局 `GET /api/event`（上游 allBounded(256)，溢出 fail-closed 断流）⑦ v2 面 create 含 agent/location，无 delete（delete 在 instance 面）⑧ location 配置打开时读一次并缓存（serve 生命周期内 workspace 集不变——与「workspace 热更新不做」一致）。
 
 ## 范围
 
 **做**：
 
 - **serve 生命周期**（新模块 humanthink/，挂载 app.ts+index.ts）：ATD 启动**先生成配置目录再拉起** `opencode serve`（127.0.0.1+独立端口+`OPENCODE_SERVER_PASSWORD` 内存生成注入+**`OPENCODE_CONFIG_DIR` 指向私有目录**）；健康监测+崩溃重启+随 ATD 销毁；启动失败重试 3 次后 degraded（聊天页提示不可用，不阻塞工单主功能）；**serve 生命周期内 workspace 集不变**（新增 workspace 需重启 ATD——记档边界）
-- **配置生成（权限载体，r3-critical 修正；r4-m2 键形约束）**：启动时生成 `{dataDir}/opencode-config/opencode.json`——① agents 段（core V2 键形）：每 workspace 一个 `atd-ht-{workspaceId}`（permissions 见规则 3）② **合并用户全局配置的 model/providers 段——V2 键形写死：`model`（单数）+`providers`（复数）；V1 触发键禁入清单：单数 `agent`/`permission`/`provider`（任一混入→整文件按 V1 迁移→V2 `agents` 被 onExcessProperty:ignore 静默丢弃——r3 失效链复现）**；合并范围刻意最小集（仅 model/providers 保模型可用性；用户 plugins/skills/mcp 不并入——ATD serve 保持干净环境，记档：如需扩展再议）；**读取用户全局配置时兼容 `opencode.json` 与 `opencode.jsonc`**（存在者优先，避免静默失配）；CONFIG_DIR 为整体替换语义（不并入 model 则 ModelNotSelectedError，P1a 反例覆盖）；生成文件随启动重写（幂等）
+- **配置生成（权限载体，r3-critical 修正；r4-m2 键形约束）**：启动时生成 `{dataDir}/opencode-config/opencode.json`——① agents 段（core V2 键形）：每 workspace 一个 `atd-ht-{workspaceId}`（permissions 见规则 3）② **合并用户全局配置的 model/providers 段——V2 键形写死：`model`（单数）+`providers`（复数）；V1 触发键禁入清单：单数 `agent`/`permission`/`provider`（任一混入→整文件按 V1 迁移→V2 `agents` 被 onExcessProperty:ignore 静默丢弃——r3 失效链复现）**；合并范围刻意最小集（仅 model/providers 保模型可用性；用户 plugins/skills/mcp 不并入——ATD serve 保持干净环境，记档：如需扩展再议）；**读取用户全局配置时兼容 `opencode.json` 与 `opencode.jsonc`**（存在者优先，避免静默失配）；**定位基准=serve 进程的 `OPENCODE_CONFIG_DIR ?? ~/.config/opencode`**（ATD 自有 serve 未设 CONFIG_DIR 于用户全局位时即读用户目录——但生成文件本身在 ATD dataDir，两处独立）；**用户全局配置若为 V1 键形（单数 provider 等）：仅提取 model/provider 语义等价段按 V2 键形并入生成文件，原样复制禁入键**；CONFIG_DIR 为整体替换语义（不并入 model 则 ModelNotSelectedError，P1a 反例覆盖）；生成文件随启动重写（幂等）
 - **WorkerProfile**：opencode.yaml capabilities 声明启用 `interactive` 能力位（worker-core schema 枚举已含该值，仅 profile 加值非 schema 扩展——r3-l4 措辞修正）；interactive 段（serveCommand 模板变量 `{port}`）；Registry 校验
 - **会话面**：创建（v2 面：agent+directory 双锚定）/prompt（v2 面）/interrupt（v2 面）/删除（instance 面+镜像 deleted_at）/审批中转；列表/详情/检索读镜像
 - **事件双通道**+web 经 ATD 统一 SSE（ATD 本 Story 引入 SSE 端点形态——非既有模式复用，r3-l4 措辞修正）
@@ -73,6 +73,6 @@ Epic 定位：聊天框 = worker interactive 会话——选 worker×workspace �
 | 项目级配置叠加（core 无开关关断 workspace 内 .opencode 读取，`OPENCODE_DISABLE_PROJECT_CONFIG` 只管 instruction） | 已知事实记档：ATD 接入的 workspace 若自带项目级 opencode 配置会叠加生效；单用户自有仓场景接受，验收 3 口径为「进程/端口/数据面零干扰」不含配置面 |
 | P1b 规则 shape 与语义预期不符 | 形态级 fallback（调规则不动架构）；探针报告冻结字面后 impl 照抄 |
 | 全局流溢出断流 | 进程内低延迟消费+断流自愈（重连+durable 对齐） |
-| 配置合并面（model/provider 键集）不全 | P1a 探针覆盖 ModelNotSelectedError 反例；生成器按键集白名单合并并留 debug 日志 |
+| 配置合并面（model/providers 键集）不全 | P1a 探针覆盖 ModelNotSelectedError 反例；生成器按键集白名单合并并留 debug 日志；合并键形 V2 写死（禁入清单见范围·配置生成节） |
 | 两面 API 混用版本耦合 | SDK pin+端点面集中声明（规则 2/5） |
 | migration 编号 | 占位；同窗合流调度者统一 generate |
