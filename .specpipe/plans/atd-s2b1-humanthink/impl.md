@@ -2,22 +2,24 @@
 
 - **topic**：atd-s2b1-humanthink
 - **上游 spec**：`.specpipe/plans/atd-s2b1-humanthink/spec.md`（v7 业务语言版，SPEC_APPROVED）
-- **契约唯一事实源**：`.specpipe/plans/atd-s2b1-humanthink/probe-report.md`（探针 8 项漂移定案——**与源码快照/既往调研冲突时以探针报告为准**）
+- **契约唯一事实源**：`.specpipe/plans/atd-s2b1-humanthink/probe-report.md`（探针 8 项漂移 + 补录 0 号全文/序号信封——**与源码快照/既往调研冲突时以探针报告为准**）
 - **基线**：main@fc589c8
+- **修订记录**：r1 REJECT 9 → **v2**（本版）：块文件集补齐（App.tsx 路由/errors.ts/helpers.ts+旁路 seam/scripts）/镜像主源实证落定（text.ended 全文+durable.seq）/SSE 帧 seq 语义/已删三分语义/permission status 字段/worker-core 测试落点 test/。serveCommand 边界/config-gen 口径枚举/404 兜底
 
 ## 技术方案
 
-总体策略：server 侧新模块成块（humanthink 引擎 + worker-core 扩展）、web 侧独立成块——文件集不相交可并行；两块以「API 契约冻结」节为并行界面。
+总体策略：server+worker-core 成块、web 成块，文件集不相交；「API 契约冻结」节为并行界面。
 
-**核心链路**（全部探针实证口径）：
+**核心链路**（探针实证口径）：
 
-1. **serve 托管**：ATD 启动 → 生成 `{dataDir}/opencode-config/opencode.json` → spawn `opencode serve --port {humanthinkPort}`（env：`OPENCODE_SERVER_PASSWORD`=crypto random 仅内存+子进程、`OPENCODE_CONFIG_DIR` 指向生成目录）；健康探测=authed `GET /api/agent` 200（5s 间隔；该端点瞬时空列表属正常，只看 HTTP 状态）；崩溃重启（退避 3 次后 degraded：humanthink 端点 503 WORKER_UNAVAILABLE，工单功能不受影响）；清理挂 Fastify `onClose`
-2. **配置生成**（config-gen）：V2 键形写死——`model`+`providers`（复数）从用户全局配置提取（兼容 `opencode.json`/`opencode.jsonc`，存在者优先；用户配置为 V1 键形时提取等价语义，禁入键绝不原样复制）+ `agents.atd-ht-{workspaceId}`：permissions 五条规则序列（探针定案形态）：①`{action:"*",resource:"*",effect:"ask"}`（**强制首条**——本二进制无匹配默认=allow，无它三档崩塌）②`{action:"external_directory",resource:"/**",effect:"deny"}` ③`{action:"read",resource:"*",effect:"allow"}` ④⑤ per readable 仓：`{action:"external_directory",resource:"<绝对路径>/*",effect:"allow"}` 与 `{action:"read",resource:"<绝对路径>/*",effect:"allow"}`（readable allow 形态未在探针覆盖——Builder 须以真跑用例锁定，规则形态可按实测微调记档）；启动幂等重写；serve 生命周期内 workspace 集不变（与既有口径一致）
-3. **会话面**：创建=`POST /api/session`（v2 面，body `{agent:"atd-ht-{ws}", location:{directory:<主仓绝对路径>}, title?}` + `x-opencode-directory` 头）；prompt=`POST /api/session/:id/prompt` body `{text}`（**字段名 text，探针漂移1**）；interrupt=v2 面 `POST /api/session/:id/interrupt`（存在性 Builder 核）；删除=instance 面 `DELETE /session/:id`（v2 无 delete）；不依赖 `GET /api/agent` 做功能（探针漂移8）
-4. **事件双通道**（探针漂移2/3 定型）：**live**=全局 `GET /api/event` 一条 SSE 共享订阅（Basic auth），按事件内 sessionID 分发——`session.text.delta/reasoning.delta` 仅转发 web 不落库；**镜像**=流内 durable 子集落 `humanthink_events`（`text.ended` 全文/reasoning.{started,ended}/tool.{called,success,failed,progress}/step.{started,ended}/permission.{asked,rejected}），seq=ATD 本地每会话递增；**恢复**=重连全局流 + 对活跃会话以 `GET /api/session/:id/message`（+`/message/:messageID` 详情，形状 Builder 核）幂等对账补缺（payload 存 message id 去重）
-5. **审批中转**：live `permission.asked` 即时推 web + 会话级 `GET /api/session/:id/permission` 轮询兜底（活跃会话 2s）；reply=`POST /api/session/:id/permission/:requestID/reply` body `{decision:"once"|"reject", message?}`——**UI 只出 once/reject 两档**（always 不开放：saved 按 projectID 与用户自用会话共享，防静默授权扩散——探针漂移6/7）；ATD 收到 asked/rejected 后写镜像自有行（type=permission_request/permission_resolved）
-6. **UnifiedEvent 扩展**（worker-core）：+`reasoning`（{text, phase: started/delta/ended}）+`permission_request`（{requestID, action, resources}）；humanthink 模块内做 `session.*`→UnifiedEvent 映射（web SSE 帧即 UnifiedEvent JSON）；task 模式映射器零改动
-7. **HTTP 客户端**：不引入 SDK（本机安装物 1.14.28 落后），humanthink 模块用原生 fetch + 手写 SSE 解析（ReadableStream 行解析，零新依赖）
+1. **serve 托管**：ATD 启动 → 生成 `{dataDir}/opencode-config/opencode.json` → spawn `opencode serve --port {humanthinkPort}`（env：`OPENCODE_SERVER_PASSWORD`=crypto random 仅内存+子进程、`OPENCODE_CONFIG_DIR` 指向生成目录）；健康探测=authed `GET /api/agent` 看 HTTP 状态（5s；空列表正常）；崩溃重启（退避 3 次转 degraded：humanthink 端点 503，工单功能不受影响）；清理挂 Fastify `onClose`；**app.ts 装配接受 `humanthink?: {enabled: boolean}`（缺省 true；测试经 helpers 传 false 旁路 spawn/订阅——既有 server 测试零 serve 进程）**
+2. **配置生成**（config-gen，纯函数）：复制键白名单=`{model, providers}`（providers 原样含凭据——dataDir 本地文件不入仓，MUST-6 边界内）；**禁入键=V1 迁移触发三键（单数 `agent`/`provider`/`permission`）及全部 V1 键**（用户全局为 V1 键形时提取 model/provider 等价语义，绝不原样复制触发键）；兼容 `opencode.json`/`opencode.jsonc`（存在者优先）；`agents.atd-ht-{workspaceId}`.permissions 五规则（探针定案）：①`{action:"*",resource:"*",effect:"ask"}`（强制首条，生成器硬编码——本二进制无匹配默认=allow）②`{action:"external_directory",resource:"/**",effect:"deny"}` ③`{action:"read",resource:"*",effect:"allow"}` ④⑤per readable 仓：`external_directory` 与 `read` 各一条 `<绝对路径>/*` allow（形态 Builder 真跑锁定）；启动幂等重写；serve 生命周期内 workspace 集不变
+3. **会话面**：创建=v2 `POST /api/session`（`{agent:"atd-ht-{ws}", location:{directory}, title?}`+`x-opencode-directory` 头）；prompt=v2 `POST /api/session/:id/prompt` `{text}`；interrupt=v2 `POST /api/session/:id/interrupt`（存在性 Builder 核 openapi，无则 instance 面 abort）；删除=instance `DELETE /session/:id`；**会话持久于共享数据目录（serve 重启 sessionID 不变）；ATD 透传遇 serve 404 → 统一 SESSION_NOT_FOUND 兜底**
+4. **事件双通道**：live=全局 `GET /api/event` 一条 SSE 共享订阅，按 sessionID 分发（`session.text.delta`/`session.reasoning.delta` 仅转发不落库）；**镜像=流内 durable 子集落 `humanthink_events`**：`text.ended`（**全文主源，`data.text`**）/`reasoning.{started,ended}`（全文载荷以实测为准，缺则仅标记）/`tool.{called,success,failed,progress}`/`step.{started,ended}`/`permission.{asked,rejected}`——**幂等键=(session_id, serve_seq)**（serve 事件信封 `durable.seq` 原生序号），对外展示 seq=本地每会话递增；**恢复=重连全局流 + 活跃会话 `GET /api/session/:id/message`（+`/message/:messageID`）对账**——**文本以 message 端点为权威兜底（与验收「不丢话」一致），live 流为主源**
+5. **审批中转**：live `permission.asked` 即推 web + 活跃会话 2s 轮询会话级 `GET /api/session/:id/permission`；reply=`POST .../permission/:requestID/reply` `{decision:"once"|"reject", message?}`（**always 不开放**——saved 按 projectID 与用户自用共享，防静默授权扩散）；ATD 写镜像自有行 permission_request/permission_resolved
+6. **UnifiedEvent 扩展**（worker-core）：+`reasoning`（{text, phase}）+`permission_request`（{requestID, action, resources, **status: 'pending'|'resolved'**}——审批历史回溯并入同型）；humanthink 模块做 `session.*`→UnifiedEvent 映射；task 映射器零改动
+7. **HTTP**：不引 SDK，原生 fetch+手写 SSE 解析（零新依赖）
+8. **serveCommand 边界**：MVP 单 serve（opencode 形态）；profile.interactive.serveCommand 供 spawn 渲染；非 opencode 协议声明的 interactive worker → Registry 校验标记不可用（聊天框 worker 下拉不列出，记档）
 
 ## 改动点
 
@@ -25,19 +27,24 @@
 
 | 文件 | 改动 |
 |---|---|
-| `apps/server/src/humanthink/serve-manager.ts`（新） | spawn/健康/重启/degraded/销毁（技术方案 1）；deps 注入 `spawn?`/`fetchImpl?`/`now?`（测试 seam） |
-| `apps/server/src/humanthink/config-gen.ts`（新） | 生成器（技术方案 2）：用户全局读取兼容/V1 提取/规则序列/幂等重写；纯函数可单测 |
-| `apps/server/src/humanthink/session-facade.ts`（新） | 会话 CRUD 透传（技术方案 3）+ 审批中转（技术方案 5）；fetch seam 注入 |
-| `apps/server/src/humanthink/events.ts`（新） | 全局流订阅/分发/镜像落库/恢复对账（技术方案 4）；UnifiedEvent 映射；per-session 有界转发缓冲 |
-| `apps/server/src/humanthink/routes.ts`（新） | 9 端点（见契约冻结）；SSE 端点（`?after` 回放镜像+live 合流）；degraded 503 |
-| `apps/server/src/app.ts` | humanthink 模块装配（serve-manager+events 订阅+routes 挂载）+ onClose 清理 |
-| `apps/server/src/index.ts` | 启动时序：config-gen → spawn → 订阅（监听前完成；失败不阻塞监听，转 degraded） |
-| `apps/server/src/config.ts` + `config.yaml` | +`humanthinkPort`（缺省 4900，占用则 +1 递补） |
-| `apps/server/src/db/schema.ts` + `drizzle/0005_s2b1_humanthink.sql` + meta | `humanthink_sessions`（id TEXT PK/worker_id/workspace_id/directory/title/created_at/last_active_at/deleted_at 可空）+ `humanthink_events`（session_id/seq/type/payload/created_at，UNIQUE(session_id,seq)，索引 session_id） |
-| `packages/worker-core/src/`（schema/类型/测试） | profile schema +`interactive` 段（serveCommand 模板变量 `{port}`，缺省 `opencode serve --port {port}`；校验必含 {port}+凭据扫描复用）；capabilities 枚举启用；UnifiedEvent +`reasoning`/+`permission_request` |
-| `workers/opencode.yaml` | capabilities +interactive；interactive 段声明 |
-| `apps/server/test/humanthink/*.test.ts`（新） | config-gen 规则序列/用户配置兼容（V1 提取·jsonc·禁入键）/幂等；事件映射（session.*→UnifiedEvent，delta 不落库）/镜像 seq 递增/对账幂等（fetch mock）；审批 once/reject 透传；API 契约（建会话字段/503 degraded/SSE after 回放）；serve-manager 生命周期（注入 spawn/fetch 假件） |
-| `apps/server/test/api-s2b1.test.ts`（新） | 9 端点契约 + 错误码（WORKER_UNAVAILABLE/SESSION_NOT_FOUND/SESSION_TERMINATED/VALIDATION） |
+| `apps/server/src/humanthink/serve-manager.ts`（新） | 技术方案 1；deps 注入 spawn/fetchImpl/now（seam） |
+| `apps/server/src/humanthink/config-gen.ts`（新） | 技术方案 2；纯函数单测 |
+| `apps/server/src/humanthink/session-facade.ts`（新） | 技术方案 3+5（404 兜底在此）；fetch seam |
+| `apps/server/src/humanthink/events.ts`（新） | 技术方案 4（幂等键/本地 seq/对账）；UnifiedEvent 映射；per-session 有界转发缓冲 |
+| `apps/server/src/humanthink/routes.ts`（新） | 9 端点（契约冻结）；SSE（`?after=本地 seq` 回放+live 合流）；degraded 503 |
+| `apps/server/src/app.ts` | humanthink 装配（`humanthink.enabled` 旁路位）+ routes 挂载 + onClose |
+| `apps/server/src/index.ts` | 启动时序：config-gen→spawn→订阅（监听前；失败转 degraded 不阻塞） |
+| `apps/server/src/domain/errors.ts` | +`WORKER_UNAVAILABLE`（503）/`SESSION_NOT_FOUND`（404）/`SESSION_TERMINATED`（422）入 ErrorCode 封闭 union 与 ERROR_STATUS 穷举 |
+| `apps/server/src/config.ts` + `config.yaml` | +`humanthinkPort`（缺省 4900，占用递补） |
+| `apps/server/src/routes/types.ts` | humanthink 契约 server 侧镜像（SessionInfo/PermissionRequest/UnifiedEvent 扩展 re-export）——web 手抄参照源 |
+| `apps/server/src/db/schema.ts` + `drizzle/0005_s2b1_humanthink.sql` + meta | `humanthink_sessions`（id TEXT PK/worker_id/workspace_id/directory/title/created_at/last_active_at/deleted_at 可空）+ `humanthink_events`（session_id/**serve_seq**（INTEGER，UNIQUE(session_id, serve_seq) 幂等键）/seq（本地展示序）/type/payload/created_at；索引 session_id） |
+| `packages/worker-core/src/profile.ts` + `src/events.ts`（或同域文件） | profile +`interactive` 段（serveCommand 模板 `{port}` 缺省 `opencode serve --port {port}`；必含 {port}+凭据扫描复用；非 opencode 协议标不可用）；UnifiedEvent +两型 |
+| `packages/worker-core/test/`（**测试必须落 test/ 目录**——vitest include=test/**，落 src/ 静默不跑） | profile interactive 校验/两型映射用例 |
+| `workers/opencode.yaml` | capabilities 数组加 `'interactive'` 值（schema 枚举已含，零 schema 枚举改动）；interactive 段声明 |
+| `apps/server/test/helpers.ts` | AppConfig 两处内联字面量补 `humanthinkPort`；+humanthink 旁路选项（默认 enabled:false 走 app 装配旁路——既有 14 测试文件零 serve 进程；humanthink 专属测试显式启用+注入假 serve） |
+| `apps/server/test/humanthink/*.test.ts`（新） | config-gen（白名单/禁入键/jsonc/V1 提取/幂等/规则序列硬编码）/事件映射与镜像幂等（durable.seq 去重）/对账（message 权威兜底幂等）/审批 once-reject/会话面 404 兜底/serve-manager 生命周期（假 spawn/fetch）/SSE after 回放 |
+| `apps/server/test/api-s2b1.test.ts`（新） | 9 端点契约+四错误码+degraded |
+| `scripts/smoke-humanthink.sh`（新，可选手动） | 真 serve 冒烟（对齐探针步骤；交付验收用，不进 fence） |
 
 **块 1 最小验证**：`pnpm -F @atd/worker-core test && pnpm -F @atd/server exec tsc --noEmit && pnpm -F @atd/server test`
 
@@ -45,46 +52,47 @@
 
 | 文件 | 改动 |
 |---|---|
-| `apps/web/src/api/humanthink.ts`（新） | 9 端点 client + SSE 订阅封装（原生 EventSource，同源免鉴权） |
-| `apps/web/src/api/types.ts` | humanthink 面类型手抄（Session/PermissionRequest/UnifiedEvent 扩展两型） |
-| `apps/web/src/pages/HumanThinkPage.tsx`（新） | 会话列表（workspace 过滤+标题搜索）+ 聊天窗（流式逐字渲染/reasoning 折叠/工具卡片/审批弹卡 once-reject/中断按钮）+ 建会话弹窗（worker×workspace，capabilities 含 interactive 才可选） |
-| `apps/web/src/components/chat/`（新目录，4 组件） | ChatMessage/ReasoningBlock/ToolCard/ApprovalCard |
+| `apps/web/src/api/humanthink.ts`（新） | 9 端点 client + EventSource SSE 封装（同源） |
+| `apps/web/src/api/types.ts` | humanthink 面类型手抄（对齐 routes/types.ts 镜像） |
+| `apps/web/src/pages/HumanThinkPage.tsx`（新） | 会话列表（workspace 过滤+搜索）+ 聊天窗（流式/reasoning 折叠/工具卡片/审批卡 once-reject/中断）+ 建会话弹窗（capabilities 含 interactive 且可用才可选） |
+| `apps/web/src/components/chat/`（新，4 组件） | ChatMessage/ReasoningBlock/ToolCard/ApprovalCard |
+| `apps/web/src/App.tsx` | **路由挂载 `/humanthink`（唯一挂载点，约 :19-25）** |
 | `apps/web/src/components/AppLayout.tsx` | 导航入口「聊天」 |
-| `apps/web/src/context/WorkspaceContext.tsx` | 复用（不改动面） |
 
 **块 2 最小验证**：`pnpm -F @atd/web build`
 
 ## API 契约冻结（块 2 并行依据）
 
-- `POST /api/humanthink/sessions` `{workerId, workspaceId, title?}` → `{session}`（session=id/workerId/workspaceId/directory/title/createdAt/deletedAt=null）
-- `GET /api/humanthink/sessions?workspaceId=&q=` → `{items}`（排除 deleted；q 匹配 title+文本 payload LIKE）
-- `GET /api/humanthink/sessions/:id` → `{session, events?}`（已删：带 deletedAt 返回；操作类 422 SESSION_TERMINATED）
-- `GET /api/humanthink/sessions/:id/events`（SSE：`?after=<seq>` 回放镜像+live；帧=`data: {<UnifiedEvent JSON>}`）
-- `POST /api/humanthink/sessions/:id/prompt` `{text}` → `{admitted:true}`；`POST .../interrupt` → `{ok:true}`；`DELETE .../:id` → `{ok:true}`（软删）
-- `GET .../permission/requests` → `{items:[{requestID, action, resources}]}`；`POST .../permission/:requestID/reply` `{decision:"once"|"reject", message?}` → `{ok:true}`
-- 错误信封复用仓内 AppError；degraded 全端点 503 `WORKER_UNAVAILABLE`
+- `POST /api/humanthink/sessions` `{workerId, workspaceId, title?}` → `{session}`（session=id/workerId/workspaceId/directory/title/createdAt/deletedAt:null）
+- `GET /api/humanthink/sessions?workspaceId=&q=` → `{items}`（排除 deleted；q=title+文本 payload LIKE）
+- **已删会话三分语义**：列表排除；`GET .../:id` 返回带 deletedAt（历史可查）；prompt/interrupt/delete/reply/events 一律 422 `SESSION_TERMINATED`
+- `GET .../:id/events`（SSE）：`?after=<本地 seq>` 先回放镜像再续 live；帧=`data: {seq?, event}`——durable 事件带 seq、delta 帧无 seq（断线重连以最后 durable seq 为 after；delta 设计不重放，UI 以镜像全文对齐）
+- `POST .../:id/prompt` `{text}` → `{admitted:true}`；`POST .../:id/interrupt` → `{ok:true}`；`DELETE .../:id` → `{ok:true}`
+- `GET .../:id/permission/requests` → `{items:[{requestID, action, resources}]}`；`POST .../permission/:requestID/reply` `{decision:"once"|"reject", message?}` → `{ok:true}`
+- 错误信封复用 AppError；degraded 全端点 503 WORKER_UNAVAILABLE
 
 ## 技术决策
 
-- D1 权限载体=OPENCODE_CONFIG_DIR 生成文件（探针 P1a 实证；CONTENT 链不可用）
-- D2 catch-all ask 首条**硬编码于生成器**（无匹配默认=allow 的实测事实；配置面不暴露该项防误删）
-- D3 always 档不开放（saved 共享面；UI/reply 仅 once/reject）
-- D4 事件通道以全局流为唯一 live 源（本二进制无 per-session 端点/无 history）；恢复=重连+message 对账（幂等 payload message id）
-- D5 不引 SDK——原生 fetch+SSE 手写解析（版本钉死风险大于手写维护成本）
-- D6 serve 数据目录不隔离（用户拍板；saved 共享为已知接受面，D3 缓解其授权扩散风险）
-- D7 真实 serve 集成不进 CI（探针已实证端到端）；单测全 mock fetch/spawn，真跑冒烟留交付验收脚本（scripts/smoke-humanthink.sh，可选手动）
+- D1 权限载体=OPENCODE_CONFIG_DIR 生成文件（探针 P1a 实证）
+- D2 catch-all ask 首条硬编码于生成器（无匹配默认=allow 实测；不暴露配置面）
+- D3 always 档不开放（saved 共享面；once/reject 两档）
+- D4 live=全局流唯一源；镜像幂等键=(session_id, serve_seq)（事件信封原生）；恢复=重连+message 对账（**文本以 message 为权威兜底**——与验收「不丢话」一致）
+- D5 不引 SDK——原生 fetch+SSE 手写
+- D6 serve 数据目录不隔离（用户拍板；D3 缓解授权扩散）
+- D7 真实 serve 集成不进 CI；单测全 mock；冒烟=scripts/smoke-humanthink.sh 手动（探针同款步骤）
+- D8 humanthink 装配旁路位（app opts `humanthink.enabled`）——既有测试零 serve 进程的前提
 
 ## 依赖
 
-- 块 2 依赖契约冻结节；块 1 依赖探针报告（已归档）
-- readable allow 规则形态需 Builder 真跑锁定（技术方案 2 ④⑤）
+- 块 2 依赖契约冻结节与 routes/types.ts 镜像类型（server 侧先行冻结于本文件）
+- readable allow 形态（技术方案 2 ④⑤）与 interrupt 端点存在性：Builder 实测锁定
 
 ## 风险
 
 | 风险 | 缓解 |
 |---|---|
-| message 端点形状未探明（列表无 payload） | 对账与详情形状 Builder 实测定；fallback=对账仅按消息计数+文本端点缺失接受（镜像以 live 流为主源） |
-| interrupt 端点存在性 | Builder 核 openapi；fallback=v2 面无则 instance 面 abort |
-| 全局流单点（断流期间事件缺） | delta 设计可丢+durable 子集可对账；有界缓冲+web after 重连 |
-| readable 仓 allow 形态 | 真跑用例锁定；规则形态微调空间（探针同族） |
-| serve 与用户自用服务的资源竞争 | 独立端口/密码/进程组；健康独立 |
+| message 端点详情形状未探明 | 对账 Builder 实测定形；文本权威兜底语义不变（验收「不丢话」硬约束，无「接受缺失」fallback） |
+| 全局流断流窗口 | delta 可丢+durable 幂等+message 对账三重保障；有界缓冲+after 重连 |
+| readable allow/interrupt 存在性 | 真跑锁定；同族 fallback（规则微调/instance abort） |
+| 事件信封 durable.seq 的稳定性（版本演进） | 幂等键失效时退化 (session_id, 本地 seq) 双写兼容（serve_seq 可空+唯一索引局部） |
+| serve 与自用服务资源竞争 | 独立端口/密码/进程组 |

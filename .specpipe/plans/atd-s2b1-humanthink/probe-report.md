@@ -23,6 +23,8 @@
 
 ## 二进制漂移与事实清单（impl 契约依据，覆盖快照口径）
 
+0. **（r1 审查后补录）`session.text.ended` 存在且为镜像全文主源**：`data.text` 载全文 + 事件信封带 **`durable:{aggregateID, seq, version}`**（serve 侧持久序号，镜像幂等键与游标原生依据）；`session.tool.failed` 存在（read 被拒后模型 shell 兜底失败实测）；`session.reasoning.ended` 存在（全文载荷以 Builder 实测为准）
+
 1. **prompt 请求体字段是 `text`**（非快照的 `prompt`；错误字段返回 `Missing key ["text"]`）
 2. **事件名前缀 `session.*`**（非快照 `session.next.*`）：`session.text.delta`、`session.reasoning.{started,delta,ended}`、`session.step.{started,streamed,ended}`、`session.tool.{input.started,input.ended,called,progress,success}`、`session.usage.updated`；权限事件 `permission.{asked,rejected}`——均在全局 `/api/event`
 3. **无 per-session 事件端点、无 /history 端点**（快照有、二进制无）——durable 回放走 `GET /api/session/:id/message`（+ `/message/:messageID` 详情；列表不含 payload，详情待 impl 核形状）
