@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Form, Input, Modal, Segmented, Select, Space, Spin, Tag, Typography } from 'antd';
+import { useNavigate } from 'react-router-dom';
+import { Alert, Button, Form, Input, message, Modal, Segmented, Select, Space, Spin, Tag, Typography } from 'antd';
 import { DeleteOutlined, PlusOutlined, ReloadOutlined, SendOutlined, StopOutlined } from '@ant-design/icons';
 import {
   createHtSession,
@@ -230,11 +231,13 @@ const ALL_WS = 'all';
  * HumanThink 聊天页（/humanthink）：
  * 左栏=会话列表（workspace 过滤+搜索+已删查看入口）；右栏=聊天窗——
  * 流式回复（SSE delta+durable 全文对齐）/思考折叠/工具卡/审批卡（once-reject 两档）/中断；
+ * 定稿回复中的 ```atd-plan 拆单计划块渲染计划卡（编辑/预检标红/确认建单，成功跳 STORY 详情）；
  * 已删会话转只读（详情内嵌历史，无操作按钮）。
  */
 export default function HumanThinkPage() {
   const { workspaceId: ctxWorkspaceId } = useWorkspace();
   const workspaceMap = useWorkspaceMap();
+  const navigate = useNavigate();
 
   // ---- 会话列表 ----
   const [wsFilter, setWsFilter] = useState<string | null>(ctxWorkspaceId);
@@ -323,6 +326,29 @@ export default function HumanThinkPage() {
   }, [selectedId, loadDetail]);
 
   const readOnly = session != null && session.deletedAt != null;
+
+  /** 计划卡确认建单成功 → 跳 STORY 详情（泳道即有；子单依赖分层在详情可视） */
+  const handlePlanConfirmed = useCallback(
+    (storyId: number) => {
+      message.success(`拆单计划已建 STORY #${storyId}`);
+      navigate(`/tickets/${storyId}`);
+    },
+    [navigate],
+  );
+
+  /** 计划块渲染上下文（会话切换/只读态/回调变更为依赖，避免每渲染重建触发子组件重提取） */
+  const planCtx = useMemo(
+    () =>
+      session != null
+        ? {
+            sessionId: session.id,
+            workspaceId: session.workspaceId,
+            readOnly,
+            onConfirmed: handlePlanConfirmed,
+          }
+        : undefined,
+    [session, readOnly, handlePlanConfirmed],
+  );
 
   // ---- SSE 订阅（仅活跃会话；已删会话操作端点一律 422，不订阅） ----
   const [sseState, setSseState] = useState<'connected' | 'reconnecting' | null>(null);
@@ -684,7 +710,15 @@ export default function HumanThinkPage() {
                   chatItems.map((it) => {
                     switch (it.kind) {
                       case 'message':
-                        return <ChatMessage key={it.key} role={it.role} text={it.text} streaming={it.streaming} />;
+                        return (
+                          <ChatMessage
+                            key={it.key}
+                            role={it.role}
+                            text={it.text}
+                            streaming={it.streaming}
+                            planCtx={planCtx}
+                          />
+                        );
                       case 'reasoning':
                         return <ReasoningBlock key={it.key} text={it.text} streaming={it.streaming} />;
                       case 'tool':
