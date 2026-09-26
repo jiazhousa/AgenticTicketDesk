@@ -10,7 +10,7 @@ import { buildWorkspaceFixture, makeTempRepo, createTestContext } from './helper
 import { createFakeServe, type FakeServe } from './humanthink/fake-serve.js';
 
 /**
- * S2b1 humanthink 9 端点契约 + 四错误码 + degraded。
+ * S2b1 humanthink 会话族 9 端点契约 + 四错误码 + degraded。
  * 经 buildServer 全装配（enabled:true + 假 serve 注入），HTTP inject 驱动。
  */
 
@@ -86,7 +86,7 @@ function createHtContext(opts: { taskOnlyWorker?: boolean } = {}): HtContext {
 
 const errBody = (res: { statusCode: number; json(): Promise<unknown> }) => res.json() as Promise<{ error: { code: string } }>;
 
-describe('humanthink 9 端点契约【S2b1】', () => {
+describe('humanthink 会话族 9 端点契约【S2b1；S2b2 增设计划端点后全族 11】', () => {
   test('旁路位缺省关闭：既有装配下路由不挂载（404 NOT_FOUND）', async () => {
     const ctx = createTestContext();
     const res = await ctx.app.inject({ method: 'GET', url: '/api/humanthink/sessions' });

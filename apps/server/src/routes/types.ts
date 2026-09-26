@@ -97,11 +97,12 @@ export type ResolveTicketBody = {
 };
 export type ResolveTicketResponse = { ticket: Ticket };
 
-// ---------- humanthink 契约镜像（S2b1；形态源头=humanthink 模块，块 2 手抄参照） ----------
+// ---------- humanthink 契约镜像（11 端点：S2b1 会话族 9 + S2b2 计划 2；形态源头=humanthink 模块，块 2 手抄参照） ----------
 
 import type { SessionEventInfo, SessionInfo, PermissionRequestInfo } from '../humanthink/routes.js';
 import type { HumanThinkEvent, HumanThinkMirrorType, SseFrame } from '../humanthink/events.js';
-export type { SessionInfo, SessionEventInfo, PermissionRequestInfo, HumanThinkEvent, HumanThinkMirrorType, SseFrame };
+import type { PlanPayload, PlanIssue } from '../humanthink/plan.js';
+export type { SessionInfo, SessionEventInfo, PermissionRequestInfo, HumanThinkEvent, HumanThinkMirrorType, SseFrame, PlanPayload, PlanIssue };
 
 /** POST /api/humanthink/sessions 请求体与响应 */
 export type CreateHumanThinkSessionBody = { workerId: string; workspaceId: string; title?: string };
@@ -114,3 +115,15 @@ export type HumanThinkPromptResponse = { admitted: true };
 export type HumanThinkOkResponse = { ok: true };
 export type HumanThinkPermissionListResponse = { items: PermissionRequestInfo[] };
 export type HumanThinkReplyBody = { decision: 'once' | 'reject'; message?: string };
+
+/**
+ * POST /api/humanthink/sessions/:id/plan/validate 响应（200 恒定；body 形态错 400 信封）。
+ * PlanIssue.field 值域冻结七值：repoRef|workerId|dependsOn|plannedFiles|id|title|spec；
+ * taskId 定位计划内局部 id，story 级问题省略。
+ */
+export type PlanValidateResponse = { issues: PlanIssue[] };
+
+/** POST /api/humanthink/sessions/:id/plan/confirm 响应（200 双态；通过=建单映射，失败=问题清单且零建单） */
+export type PlanConfirmResponse =
+  | { ok: true; story: { id: number }; tasks: Array<{ localId: string; id: number }> }
+  | { ok: false; issues: PlanIssue[] };

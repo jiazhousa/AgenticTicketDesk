@@ -221,9 +221,15 @@ function assembleHumanThink(
     runtime: { serve, facade, events, workerId: profile?.id ?? null },
     start: async () => {
       // 启动时序（监听前）：config-gen（幂等重写）→ spawn（失败转 degraded 不阻塞）→ 订阅
+      // 产出合同取值域数据源：workspace repos（id/role/primary 逐字段）+ 全局 worker 清单（启动期快照）
       const cfg = buildServeConfig(
         extractUserGlobal(readUserGlobalRaw()),
-        runtime.workspaces.list().map((ws) => ({ id: ws.id, repos: ws.repos.map((r) => ({ path: r.path, role: r.role })) })),
+        runtime.workspaces.list().map((ws) => ({
+          id: ws.id,
+          primary: ws.primary,
+          repos: ws.repos.map((r) => ({ id: r.id, path: r.path, role: r.role })),
+        })),
+        runtime.registry.list().map((p) => ({ id: p.id, name: p.name, capabilities: p.capabilities })),
       );
       writeServeConfig(configDir, cfg);
       if (serve != null) await serve.start();

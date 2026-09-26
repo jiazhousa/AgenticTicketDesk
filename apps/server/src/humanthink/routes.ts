@@ -8,12 +8,13 @@ import { AppError } from '../domain/errors.js';
 import { humanthinkEvents, humanthinkSessions } from '../db/schema.js';
 import type * as schema from '../db/schema.js';
 import type { EventHub, HumanThinkEvent } from './events.js';
+import { confirmPlan, planPayloadSchema, validatePlan } from './plan.js';
 
 /**
- * humanthink 路由（S2b1 契约冻结）：9 端点。
+ * humanthink 路由：11 端点（S2b1 会话族 9 + S2b2 计划 validate/confirm 2）。
  * degraded（serve 非 ready/无可用 worker）全端点 503 WORKER_UNAVAILABLE——工单功能不受影响；
  * 已删会话三分语义：列表排除；详情可查（含 deletedAt+内嵌历史）；操作端点（prompt/interrupt/
- * delete/reply/SSE）一律 422 SESSION_TERMINATED。
+ * delete/reply/SSE/plan）一律 422 SESSION_TERMINATED。
  */
 
 /** 会话视图（API 形态；createdAt/deletedAt 为 epoch ms） */
@@ -115,6 +116,15 @@ export function registerHumanThinkRoutes(
 
   const assertActive = (row: typeof humanthinkSessions.$inferSelect): void => {
     if (row.deletedAt != null) throw new AppError('SESSION_TERMINATED', '会话已删除，历史仍可查看但不可再操作');
+  };
+
+  /** 会话归属 workspace 解析（repoRef 取值域与建单归属之源；yaml 漂移致缺失时 422） */
+  const loadSessionWorkspace = (row: typeof humanthinkSessions.$inferSelect) => {
+    const ws = runtime.workspaces.get(row.workspaceId);
+    if (ws == null) {
+      throw new AppError('WORKSPACE_UNKNOWN', `会话所属 workspace 已不可用：${row.workspaceId}（workspaces 声明已变更）`);
+    }
+    return ws;
   };
 
   app.post('/api/humanthink/sessions', async (req) => {
@@ -304,5 +314,35 @@ export function registerHumanThinkRoutes(
     await ht.facade.replyPermission(id, requestID, body.decision, body.message);
     ht.events.recordReply(id, requestID, body.decision);
     return { ok: true };
+  });
+
+  // 计划预检：200 恒定（body 形态错走 400 信封；空 issues=可确认）
+  app.post('/api/humanthink/sessions/:id/plan/validate', async (req) => {
+    assertAvailable();
+    const id = (req.params as { id: string }).id;
+    const body = parse(planPayloadSchema, req.body);
+    const row = loadSession(id);
+    assertActive(row);
+    const ws = loadSessionWorkspace(row);
+    return { issues: validatePlan(body, { ws, registry: runtime.registry }) };
+  });
+
+  // 计划确认建单：200 双态——通过 {ok:true, story, tasks}；校验失败 {ok:false, issues} 且零建单
+  // （不走 AppError 信封，对象形态问题清单直达计划卡标红；建单事务失败仍走错误信封）
+  app.post('/api/humanthink/sessions/:id/plan/confirm', async (req) => {
+    assertAvailable();
+    const id = (req.params as { id: string }).id;
+    const body = parse(planPayloadSchema, req.body);
+    const row = loadSession(id);
+    assertActive(row);
+    const ws = loadSessionWorkspace(row);
+    return confirmPlan(body, {
+      db,
+      service: runtime.service,
+      ws,
+      registry: runtime.registry,
+      // 事务提交后同步触发链上无依赖根任务放行（闸门满落 S3 排队非失败）
+      onCommitted: (storyId) => runtime.dispatcher.releaseChainReady(storyId),
+    });
   });
 }

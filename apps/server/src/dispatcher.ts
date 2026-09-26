@@ -527,12 +527,11 @@ export class Dispatcher {
   }
 
   /**
-   * 编排链自动流转：单落定（DONE）后，检查以本单为 blockedBy 的下游 TASK——
-   * 有 parent（编排链节点）且处于 SPEC_READY、其余依赖全部 DONE 时自动放行。
-   * 独立单（无 parent）不自动放行（保持人工控制）。
+   * 编排链自动流转入口①（以触发票为轴）：单落定（DONE）后枚举以本单为 blockedBy 的下游，
+   * 逐票尝试放行。独立单（无 parent）不自动放行（保持人工控制）。
    */
   onTicketSettled(ticketId: number): void {
-    const { service, db } = this.deps;
+    const { db } = this.deps;
     let downstream: { id: number }[] = [];
     try {
       downstream = db
@@ -545,30 +544,59 @@ export class Dispatcher {
     }
     for (const row of downstream) {
       try {
-        const t = service.getTicket(row.id);
-        // 仅对已预绑定 worker 的编排链节点自动放行——未定谁干活的不自动开工（留人工）
-        if (t.type !== 'TASK' || t.status !== 'SPEC_READY' || t.parentId == null || !t.workerId) continue;
-        // 其余依赖是否全部 DONE
-        const deps = db
-          .select({ status: tickets.status })
-          .from(ticketDependencies)
-          .innerJoin(tickets, eq(ticketDependencies.blockedByTicketId, tickets.id))
-          .where(eq(ticketDependencies.ticketId, row.id))
-          .all();
-        if (deps.every((d) => d.status === 'DONE')) {
-          const dispatched = service.transition(row.id, 'DISPATCHED', {
-            actor: 'system',
-            note: '编排链依赖满足，自动放行',
-          });
-          // 闸门满/文件冲突时 transition 内部落排队（保持 SPEC_READY），非放行成功不触发 spawn
-          if (dispatched.status === 'DISPATCHED') {
-            this.onDispatched(dispatched);
-          }
-        }
+        this.tryReleaseChainTicket(row.id);
       } catch (e) {
         // 单个下游放行失败不阻断其他下游
         console.error('[atd-dispatcher] 自动放行失败', row.id, e);
       }
+    }
+  }
+
+  /**
+   * 编排链自动流转入口②（以 STORY 为轴）：confirm 原子建单事务提交后同步调用，
+   * 枚举子单逐票尝试放行——链上无依赖根任务即刻放行（建单完成即触发点），
+   * 有依赖任务待上游 DONE 后经入口①接力。与入口①共用放行核心，行为面单一。
+   */
+  releaseChainReady(storyId: number): void {
+    const children = this.deps.db
+      .select({ id: tickets.id })
+      .from(tickets)
+      .where(eq(tickets.parentId, storyId))
+      .orderBy(asc(tickets.id))
+      .all();
+    for (const row of children) {
+      try {
+        this.tryReleaseChainTicket(row.id);
+      } catch (e) {
+        console.error('[atd-dispatcher] 编排链放行失败', row.id, e);
+      }
+    }
+  }
+
+  /**
+   * 编排链放行核心（单票判定，两枚举入口共用）：TASK + SPEC_READY + 有 parent +
+   * 预绑定 worker + 其余依赖全 DONE → system 自动放行；闸门满/文件冲突时 transition
+   * 内部落 S3 排队（保持 SPEC_READY），无失败面；非放行成功不触发 spawn。
+   */
+  private tryReleaseChainTicket(ticketId: number): void {
+    const { service, db } = this.deps;
+    const t = service.getTicket(ticketId);
+    // 仅对已预绑定 worker 的编排链节点自动放行——未定谁干活的不自动开工（留人工）
+    if (t.type !== 'TASK' || t.status !== 'SPEC_READY' || t.parentId == null || !t.workerId) return;
+    // 其余依赖是否全部 DONE
+    const deps = db
+      .select({ status: tickets.status })
+      .from(ticketDependencies)
+      .innerJoin(tickets, eq(ticketDependencies.blockedByTicketId, tickets.id))
+      .where(eq(ticketDependencies.ticketId, ticketId))
+      .all();
+    if (!deps.every((d) => d.status === 'DONE')) return;
+    const dispatched = service.transition(ticketId, 'DISPATCHED', {
+      actor: 'system',
+      note: '编排链依赖满足，自动放行',
+    });
+    if (dispatched.status === 'DISPATCHED') {
+      this.onDispatched(dispatched);
     }
   }
 
