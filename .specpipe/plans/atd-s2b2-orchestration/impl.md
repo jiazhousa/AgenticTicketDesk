@@ -12,7 +12,7 @@
 2. **计划块协议**：助手在回复中输出 fenced 块 ```atd-plan + JSON：
    `{"story":{"title","description"},"tasks":[{"id":"t1","title","spec","repoRef?","workerId","dependsOn":[],"plannedFiles?":[]}]}`——id 为计划内局部短 id；repoRef 缺省=主仓 id
 3. **web 解析与渲染**：ChatMessage 渲染 assistant 文本前提取 ```atd-plan 块（正则+JSON.parse；失败降级原样文本）；块成功解析→渲染 PlanCard，块外文本照常 markdown；PlanCard 本地编辑态（刷新回原稿，spec 规则 9）
-4. **校验单源**（server `humanthink/plan.ts`）：validate 与 confirm 共用——workspaceId 取会话归属；repoRef ∈ 该 workspace repos（缺省 primary）；workerId ∈ Registry 且可用；局部 id 唯一；dependsOn ⊆ 本计划 id 集+拓扑无环；plannedFiles 形态（相对路径/尾斜杠目录——复用 S3 `file-set` 单一实现，不另起双轨）；返回 `issues:[{taskId?, field, message}]`（空=通过）
+4. **校验单源**（server `humanthink/plan.ts`）：validate 与 confirm 共用——workspaceId 取会话归属；repoRef ∈ 该 workspace repos（缺省 primary）；workerId ∈ Registry 且可用；局部 id 唯一；dependsOn ⊆ 本计划 id 集+拓扑无环；plannedFiles 形态（相对路径/尾斜杠目录——与 S3 plannedFiles 同口径校验；plan.ts 字面内联并注释互指，未抽共享 export（最小越界纪律））；返回 `issues:[{taskId?, field, message}]`（空=通过）
 5. **原子建单**（confirm）：**外层 `db.transaction` 包 service 调用**（createTicket/addDependency/submitSpec 现各自独立事务，drizzle better-sqlite3 嵌套走 savepoint、外层抛错全量回滚——r1 核实；**事务回调禁 async**，better-sqlite3 同步语义）：建 STORY → 逐任务建 TASK（parentId=story，repoRef 落库实际值，workerId 预绑定）→ addDependency（局部 id→真实 id 映射）→ 逐任务 submitSpec（specContent+plannedFiles 冻结）；**事务提交后同步调用**根任务放行（见 6，不在事务内）；返回 `{ok:true, story:{id}, tasks:[{localId,id}]}`
 6. **根任务放行触发**（spec 规则 6 新入口；r1-m 两层定型）：私有核心 `tryReleaseChainTicket(ticketId)`（单票判定+放行前置链 actor=system——闸门满/文件冲突落 S3 排队，无失败面）+ **两个枚举入口**：`onTicketSettled`（以触发票为轴枚举下游，行为不变）与 `releaseChainReady(storyId)`（以 STORY 为轴枚举子单——confirm 事务提交后同步调用）；两入口共用核心，行为面单一
 7. **跳转**：confirm 成功 → web 跳 STORY 详情页（泳道即有）
@@ -40,7 +40,7 @@
 |---|---|
 | `apps/web/src/components/chat/PlanCard.tsx`（新） | 计划卡：story 标题/描述编辑；任务卡增删（title/spec 文本域、repoRef Select=会话 workspace repos、workerId Select=available workers、dependsOn 多选=计划内局部 id、plannedFiles 文本域每行一路径）；预检按钮（validate→违规项标红至对应任务字段）；确认按钮（confirm→成功跳 `/tickets/:storyId`）；编辑态本地（刷新回原稿） |
 | `apps/web/src/components/chat/ChatMessage.tsx` | assistant 文本渲染前提取 atd-plan 块（技术方案 3）——提取成功传 PlanCard，块外文本照常 markdown |
-| `apps/web/src/pages/HumanThinkPage.tsx` | PlanCard 确认成功回调（navigate STORY 详情）；校验状态透传 |
+| `apps/web/src/pages/HumanThinkPage.tsx` | PlanCard 确认成功回调（navigate STORY 详情）；校验/加载状态由 PlanCard 自持展示 |
 | `apps/web/src/api/humanthink.ts` | +validatePlan/confirmPlan 两端点 |
 | `apps/web/src/api/types.ts` | 手抄 PlanPayload/PlanIssue/响应型（对齐 routes/types.ts 镜像逐字段） |
 
@@ -60,7 +60,7 @@
 - D3 confirm 事务边界=建单+依赖+冻结；放行触发在事务后（失败面=排队非错误，不破坏原子性语义）
 - D4 system 提示模板入 config-gen 纯函数（启动期快照注入 repos/workers；与 serve 生命周期一致）
 - D5 局部 id 协议：计划内短 id（t1/t2），依赖引用仅限本计划；服务端映射为真实单号
-- D6 放行入口收敛：提取既有下游放行核心，两入口（onTicketSettled/planConfirmed）共用，行为面单一
+- D6 放行入口收敛：提取既有下游放行核心 `tryReleaseChainTicket`，两入口（`onTicketSettled` 触发票轴/`releaseChainReady` STORY 轴）共用，行为面单一
 
 ## 依赖
 
