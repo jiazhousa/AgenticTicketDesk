@@ -680,16 +680,8 @@ export default function HumanThinkPage() {
                       case 'tool':
                         return <ToolCard key={it.key} tool={it.tool} status={it.status} />;
                       case 'approval':
-                        return (
-                          <ApprovalCard
-                            key={it.key}
-                            action={it.action}
-                            resources={it.resources}
-                            state={it.state}
-                            replying={replyingFor === it.requestID}
-                            onReply={(d) => void handleReply(it.requestID, d)}
-                          />
-                        );
+                        // 审批卡不在对话流渲染——集中右侧审查位（OpenCode 网页端同款三栏模式）
+                        return null;
                     }
                   })
                 )}
@@ -731,6 +723,54 @@ export default function HumanThinkPage() {
           </>
         )}
       </main>
+
+      {/* 审查位（右栏）：审批请求集中在此——待审可裁决，已裁决留痕（OpenCode 网页端三栏模式的右侧面板） */}
+      {session != null ? (
+        <aside
+          style={{
+            width: 300,
+            flex: 'none',
+            borderLeft: '1px solid #f0f0f0',
+            display: 'flex',
+            flexDirection: 'column',
+            minHeight: 0,
+          }}
+        >
+          <div style={{ padding: '10px 14px', borderBottom: '1px solid #f0f0f0' }}>
+            <Typography.Text strong style={{ fontSize: 13 }}>
+              审查
+            </Typography.Text>
+            <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+              {chatItems.filter((it) => it.kind === 'approval' && it.state === 'pending').length > 0
+                ? `${chatItems.filter((it) => it.kind === 'approval' && it.state === 'pending').length} 项待审`
+                : '无待审'}
+            </Typography.Text>
+          </div>
+          <div style={{ flex: 1, overflow: 'auto', padding: '10px 14px' }}>
+            {chatItems.filter((it) => it.kind === 'approval').length === 0 ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                Agent 请求执行敏感动作（跑命令/改文件）时，审批卡会出现在这里
+              </Typography.Text>
+            ) : (
+              <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                {[...chatItems]
+                  .reverse()
+                  .filter((it): it is Extract<ChatItem, { kind: 'approval' }> => it.kind === 'approval')
+                  .map((it) => (
+                    <ApprovalCard
+                      key={it.key}
+                      action={it.action}
+                      resources={it.resources}
+                      state={it.state}
+                      replying={replyingFor === it.requestID}
+                      onReply={(d) => void handleReply(it.requestID, d)}
+                    />
+                  ))}
+              </Space>
+            )}
+          </div>
+        </aside>
+      ) : null}
 
       {/* 建会话弹窗 */}
       <Modal
