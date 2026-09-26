@@ -1,5 +1,5 @@
 /**
- * HumanThink 聊天 API 封装（9 端点 + SSE，契约冻结于 impl「API 契约冻结」节）。
+ * HumanThink 聊天 API 封装（11 端点 + SSE，契约冻结于 impl「API 契约冻结」节）。
  * 错误语义同 tickets.ts：非 2xx 解析 AppError 信封抛 ApiError + toast；
  * 轮询/SSE 相关调用走 silent（错误由调用方行内展示或据此转只读/降级视图）。
  * 复用 tickets.ts 导出的 ApiError（跨模块单一错误类型，调用方统一 catch）。
@@ -19,9 +19,12 @@ import type {
   HumanThinkSession,
   HumanThinkSessionDetailResponse,
   HumanThinkSessionListResponse,
+  PlanConfirmResponse,
+  PlanPayload,
+  PlanValidateResponse,
 } from './types';
 
-/** 会话资源路径前缀（9 端点共用） */
+/** 会话资源路径前缀（11 端点共用） */
 const BASE = '/api/humanthink/sessions';
 
 /** 同 tickets.ts 底层请求：成功=资源 JSON 本体；失败=`{ error: { code, message, details? } }` → ApiError */
@@ -127,6 +130,30 @@ export function replyHtPermission(
       body: JSON.stringify(req),
     },
   );
+}
+
+/**
+ * POST /api/humanthink/sessions/:id/plan/validate —— 拆单计划预检（200 恒定返回 issues）。
+ * 服务端校验单源（repoRef/workerId/局部 id/依赖/文件集形态），issues 空即通过；
+ * 卡内编辑后手动触发，字段级标红以响应定位。
+ */
+export function validateHtPlan(id: string, plan: PlanPayload): Promise<PlanValidateResponse> {
+  return request<PlanValidateResponse>(`${BASE}/${encodeURIComponent(id)}/plan/validate`, {
+    method: 'POST',
+    body: JSON.stringify(plan),
+  });
+}
+
+/**
+ * POST /api/humanthink/sessions/:id/plan/confirm —— 确认建单（200 双态，不走 AppError 信封）。
+ * ok=true：原子建 STORY+TASK 链（含依赖与 spec 冻结）并触发根任务放行，返回局部 id→真实单号映射；
+ * ok=false：零建单，issues 同 validate 定位标红。
+ */
+export function confirmHtPlan(id: string, plan: PlanPayload): Promise<PlanConfirmResponse> {
+  return request<PlanConfirmResponse>(`${BASE}/${encodeURIComponent(id)}/plan/confirm`, {
+    method: 'POST',
+    body: JSON.stringify(plan),
+  });
 }
 
 /* ==================== SSE 订阅（同源 EventSource） ==================== */

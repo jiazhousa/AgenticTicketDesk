@@ -429,3 +429,50 @@ export interface HumanThinkEventFrame {
   seq?: number;
   event: HumanThinkEvent;
 }
+
+/* ==================== S2b2 编排拆单计划（手抄同步，对齐 impl「API 契约冻结」节） ==================== */
+
+/** 计划内任务（局部 id 协议：t1/t2 等短 id，dependsOn 仅可引用本计划内 id；服务端映射为真实单号） */
+export interface PlanTask {
+  /** 计划内局部短 id（dependsOn 引用键；confirm 响应以 localId 回映射） */
+  id: string;
+  title: string;
+  /** 任务 spec（业务语言——产出合同要求不含技术实现细节） */
+  spec: string;
+  /** 目标仓 id（缺省=会话所属 workspace 主仓） */
+  repoRef?: string;
+  /** 执行 worker id（confirm 时预绑定建单） */
+  workerId: string;
+  /** 依赖的任务局部 id 列表（仅限本计划内） */
+  dependsOn?: string[];
+  /** 计划改动文件声明（相对 repoRef 路径，尾斜杠=目录递归包含；随 spec 冻结） */
+  plannedFiles?: string[];
+}
+
+/** 拆单计划载荷（validate / confirm 两端共用一字面） */
+export interface PlanPayload {
+  story: { title: string; description: string };
+  tasks: PlanTask[];
+}
+
+/** 校验问题项（taskId 定位任务——story 级问题省略；field 值域冻结七值） */
+export interface PlanIssue {
+  /** 计划内任务局部 id（story 级问题省略） */
+  taskId?: string;
+  field: 'repoRef' | 'workerId' | 'dependsOn' | 'plannedFiles' | 'id' | 'title' | 'spec';
+  /** 中文人话 */
+  message: string;
+}
+
+/** POST .../:id/plan/validate 响应（200 恒定；issues 空=通过） */
+export interface PlanValidateResponse {
+  issues: PlanIssue[];
+}
+
+/**
+ * POST .../:id/plan/confirm 响应（200 双态，不走 AppError 信封）：
+ * ok=true 原子建 STORY+TASK 链并触发根任务放行；ok=false 零建单仅返回 issues。
+ */
+export type PlanConfirmResponse =
+  | { ok: true; story: { id: number }; tasks: { localId: string; id: number }[] }
+  | { ok: false; issues: PlanIssue[] };
