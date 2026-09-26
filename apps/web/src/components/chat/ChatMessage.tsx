@@ -70,7 +70,6 @@ const mdComponents = {
         borderCollapse: 'collapse',
         margin: '8px 0',
         fontSize: 13,
-        '& th, & td': undefined,
       }}
     >
       {children}
