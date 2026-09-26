@@ -122,7 +122,7 @@ export type DispatchLimits = { maxConcurrentPerRepo: number };
 const DEFAULT_WORKSPACE_ID = 'atd';
 
 /** spec 快照长度上限（prompt=spec+执行要求，超限在冻结点拦截） */
-const MAX_SPEC_BYTES = 128 * 1024;
+export const MAX_SPEC_BYTES = 128 * 1024;
 
 type TicketRow = typeof tickets.$inferSelect;
 type TxCallback = Parameters<BetterSQLite3Database<typeof schema>['transaction']>[0];

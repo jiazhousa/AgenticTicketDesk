@@ -1,5 +1,6 @@
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { WorkerRegistry } from '@atd/worker-core';
+import { MAX_SPEC_BYTES } from '../domain/ticket-service.js';
 import { z } from 'zod';
 import type * as schema from '../db/schema.js';
 import type { TicketService } from '../domain/ticket-service.js';
@@ -11,8 +12,7 @@ import type { Workspace } from '../workspaces.js';
  * 草稿活在会话文本中，服务端不存计划——confirm 提交的即最终态。
  */
 
-/** spec 快照长度上限（与 ticket-service MAX_SPEC_BYTES 一致：prompt=spec+执行要求，冻结点拦截） */
-const MAX_SPEC_BYTES = 128 * 1024;
+/** spec 快照长度上限——单源引自 ticket-service（prompt=spec+执行要求，冻结点拦截） */
 
 /** 计划 payload（契约冻结；形态源头——routes/types.ts 手抄镜像参照） */
 export const planPayloadSchema = z.object({

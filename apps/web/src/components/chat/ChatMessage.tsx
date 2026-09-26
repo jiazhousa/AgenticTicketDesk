@@ -31,7 +31,7 @@ function asPlanPayload(v: unknown): PlanPayload | null {
   if (typeof story !== 'object' || story == null) return null;
   const s = story as { title?: unknown; description?: unknown };
   if (typeof s.title !== 'string' || typeof s.description !== 'string') return null;
-  if (!Array.isArray(tasks)) return null;
+  if (!Array.isArray(tasks) || tasks.length === 0) return null;
   const parsedTasks: PlanPayload['tasks'] = [];
   for (const raw of tasks) {
     if (typeof raw !== 'object' || raw == null) return null;
@@ -209,7 +209,7 @@ export default function ChatMessage({
     <div style={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start' }}>
       {segments != null && planCtx != null ? (
         // 分段视图：块外文本保留气泡样式，计划卡以独立卡片纵向排列（结构化 UI 不塞气泡）
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '88%' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: '88%' }}>
           {segments.map((seg, i) =>
             seg.kind === 'plan' ? (
               <PlanCard

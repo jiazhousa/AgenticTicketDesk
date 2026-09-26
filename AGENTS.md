@@ -65,7 +65,7 @@ SPEC_READY 排队中（queuedReason 非空）→ CANCELLED 亦触发队列重校
 - 5s tick 到期恢复（闸门满则 retryAt 顺延一 tick；恢复走 actor=system 重 spawn round+1）；continue/reassign/reopen 清零 retryCount
 
 ### HumanThink 聊天（S2b1）
-- **9 端点族** `/api/humanthink/sessions*`；worker×workspace×会话三元组；会话列表/详情读 ATD 镜像表（serve 侧仅透传操作）
+- **11 端点族** `/api/humanthink/sessions*`（S2b1 会话族 9 + S2b2 计划 validate/confirm 2——confirm 200 双态 `{ok:true,...}/{ok:false,issues}`，不走 AppError 信封）；worker×workspace×会话三元组；会话列表/详情读 ATD 镜像表（serve 侧仅透传操作）
 - **事件双通道**：live=serve 全局 `/api/event` 单条订阅按 sessionID 分发（delta 不落库不重放，帧事件名用短名 `text.delta` 等）；镜像=durable 子集 + ATD 自有行（message/permission_request/permission_resolved）落 `humanthink_events`，幂等键 `(session_id, serve_seq)`，信封缺失跳过落库仅转发+warn
 - **恢复**：serve 重连全局流 + 活跃会话 message 对账（连接建立时触发；message 为文本权威兜底）；镜像 message 行与 text.ended 无跨型去重（渲染层 messageId 去重不跨型）
 - **软删三分**：列表排除（`?deleted=1` 枚举）/详情可查含内嵌历史（唯一读通道）/操作端点与 SSE 422 SESSION_TERMINATED
