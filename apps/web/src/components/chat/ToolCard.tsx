@@ -1,6 +1,6 @@
 import { Typography } from 'antd';
 import { CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, ToolOutlined } from '@ant-design/icons';
-import type { ReactNode } from 'react';
+import { memo, type ReactNode } from 'react';
 
 /** 工具卡状态：called=运行中 / success=完成 / failed=失败（progress 保持运行中） */
 export type ToolStatus = 'running' | 'success' | 'failed';
@@ -15,7 +15,7 @@ const STATUS_META: Record<ToolStatus, { icon: ReactNode; label: string; color: s
  * 工具动作卡片（tool.called 打开、progress 保持、success/failed 收口；
  * 孤儿结果帧——重放窗口外先见结果——直接以终态落卡）。
  */
-export default function ToolCard({ tool, status }: { tool: string; status: ToolStatus }) {
+function ToolCard({ tool, status }: { tool: string; status: ToolStatus }) {
   const meta = STATUS_META[status];
   return (
     <div
@@ -40,3 +40,5 @@ export default function ToolCard({ tool, status }: { tool: string; status: ToolS
     </div>
   );
 }
+
+export default memo(ToolCard);

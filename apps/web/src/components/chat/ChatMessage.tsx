@@ -4,7 +4,7 @@
  * assistant 定稿文本支持 ```atd-plan 拆单计划块：提取成功渲染 PlanCard，块外文本照常 markdown；
  * 解析失败（JSON/形状不符）整块原样降级为文本。流式期间不提取（fence 未闭合时按普通代码块展示）。
  */
-import { useMemo } from 'react';
+import { useMemo, memo} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { PlanPayload } from '../../api/types';
@@ -186,7 +186,7 @@ const mdComponents = {
   ),
 } as const;
 
-export default function ChatMessage({
+function ChatMessage({
   role,
   text,
   streaming = false,
@@ -287,3 +287,5 @@ export default function ChatMessage({
     </div>
   );
 }
+
+export default memo(ChatMessage);

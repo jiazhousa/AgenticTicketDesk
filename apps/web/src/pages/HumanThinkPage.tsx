@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Alert, Button, Form, Input, message, Modal, Segmented, Select, Space, Spin, Tag, Typography } from 'antd';
-import { DeleteOutlined, PlusOutlined, ReloadOutlined, SendOutlined, StopOutlined } from '@ant-design/icons';
+import { DeleteOutlined, DownOutlined, PlusOutlined, ReloadOutlined, SendOutlined, StopOutlined } from '@ant-design/icons';
 import {
   createHtSession,
   deleteHtSession,
@@ -25,14 +25,12 @@ import type {
 import { useWorkspace } from '../context/WorkspaceContext';
 import { useWorkspaceMap } from '../utils/workspace';
 import { formatTime } from '../utils/format';
-import { useInterval } from '../utils/hooks';
 import ChatMessage from '../components/chat/ChatMessage';
 import ReasoningBlock from '../components/chat/ReasoningBlock';
 import ToolCard, { type ToolStatus } from '../components/chat/ToolCard';
 import ApprovalCard, { type ApprovalState } from '../components/chat/ApprovalCard';
 
-/** 活跃会话待审集合轮询间隔（审批即推 SSE，轮询兜首屏与断连窗口） */
-const PERM_POLL_MS = 2000;
+/** 待审集合刷新触发点：会话打开/SSE（重）连/权限类帧到达——事件驱动，无周期轮询（验收反馈：2s 轮询引发整页重渲染与滚动拉底） */
 /** antd Header 默认高度（页面满高布局扣减） */
 const HEADER_H = 64;
 
@@ -368,20 +366,32 @@ export default function HumanThinkPage() {
             seenSeqRef.current.add(frame.seq);
           }
           setEvents((prev) => [...prev, { ...frame.event, seq: frame.seq }]);
+          // 权限类帧触发待审集合刷新（事件驱动，替代周期轮询）
+          if (typeof frame.event.type === 'string' && frame.event.type.startsWith('permission')) void refreshPerms();
         },
-        onStateChange: setSseState,
+        onStateChange: (st) => {
+          setSseState(st);
+          if (st === 'connected') void refreshPerms(); // 首连/重连补齐断连窗口的待审变化
+        },
       },
       initialAfterRef.current,
     );
     return () => sub.close();
   }, [sseSessionId]);
 
-  // ---- 待审集合轮询（活跃会话；兼作会话健康探测——SESSION_TERMINATED 触发转只读） ----
+  // ---- 待审集合（事件驱动：会话打开/SSE（重）连/权限类帧到达时刷新；无周期轮询——2s 轮询曾引发整页重渲染与滚动拉底） ----
   const [pendingPerms, setPendingPerms] = useState<HumanThinkPermissionRequest[]>([]);
-  const pollPerms = useCallback(async () => {
+  const refreshPerms = useCallback(async () => {
     if (sseSessionId == null) return;
     try {
-      setPendingPerms(await listHtPermissionRequests(sseSessionId));
+      const next = await listHtPermissionRequests(sseSessionId);
+      setPendingPerms((prev) => {
+        // 同集合不换引用——避免无意义重渲染（双保险）
+        const same =
+          prev.length === next.length &&
+          prev.every((a, i) => a.requestID === next[i]?.requestID && a.action === next[i]?.action);
+        return same ? prev : next;
+      });
     } catch (e) {
       if (e instanceof ApiError && e.code === 'SESSION_TERMINATED') {
         void loadDetail(sseSessionId); // 会话已在别处删除——刷新详情转只读视图
@@ -389,7 +399,6 @@ export default function HumanThinkPage() {
       // 其余（瞬时网络/降级）静默：SSE 重连态已在头部展示
     }
   }, [sseSessionId, loadDetail]);
-  useInterval(() => void pollPerms(), sseSessionId != null ? PERM_POLL_MS : null);
 
   // ---- 聊天窗派生态 ----
   const chatItems = useMemo(() => toChatItems(events, readOnly ? [] : pendingPerms), [events, pendingPerms, readOnly]);
@@ -400,10 +409,27 @@ export default function HumanThinkPage() {
   );
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
+  // stick-to-bottom 模式（业界标准：仅当用户位于底部才跟随新内容；滚上去保持位置并可一键回底）
+  const atBottomRef = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (el == null) return;
+    const isB = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (isB !== atBottomRef.current) {
+      atBottomRef.current = isB;
+      setAtBottom(isB);
+    }
+  }, []);
+  const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (el != null) el.scrollTop = el.scrollHeight;
-  }, [chatItems]);
+    atBottomRef.current = true;
+    setAtBottom(true);
+  }, []);
+  useEffect(() => {
+    if (atBottomRef.current) scrollToBottom();
+  }, [chatItems, scrollToBottom]);
 
   // ---- 建会话弹窗 ----
   const [createOpen, setCreateOpen] = useState(false);
@@ -473,6 +499,7 @@ export default function HumanThinkPage() {
     if (text === '' || session == null || readOnly || sending) return;
     setSending(true);
     setInput('');
+    scrollToBottom(); // 自己的消息发送后强制回底（stick 语义例外）
     try {
       await promptHtSession(session.id, text);
     } catch (e) {
@@ -510,7 +537,7 @@ export default function HumanThinkPage() {
       await replyHtPermission(session.id, requestID, { decision });
       // 乐观收口（SSE permission_resolved 到达后按 requestID 幂等同态）
       setEvents((prev) => [...prev, { type: 'permission_resolved', requestID, decision }]);
-      void pollPerms();
+      void refreshPerms();
     } catch (e) {
       if (e instanceof ApiError && e.code === 'SESSION_TERMINATED') void loadDetail(session.id);
     } finally {
@@ -689,8 +716,12 @@ export default function HumanThinkPage() {
               />
             ) : null}
 
-            {/* 消息区 */}
-            <div ref={scrollRef} style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
+            {/* 消息区（onScroll 维护 atBottom——stick-to-bottom 判定源） */}
+            <div
+              ref={scrollRef}
+              onScroll={handleScroll}
+              style={{ flex: 1, overflow: 'auto', padding: '16px 20px', position: 'relative' }}
+            >
               {/* 块级 flex + margin auto 居中——antd Space 为 inline-flex，margin auto 无效导致宽屏左锚定（验收反馈） */}
               <div
                 style={{
@@ -731,6 +762,16 @@ export default function HumanThinkPage() {
                 )}
               </div>
             </div>
+            {!atBottom ? (
+              <Button
+                size="small"
+                shape="circle"
+                icon={<DownOutlined />}
+                onClick={scrollToBottom}
+                style={{ position: 'absolute', right: 360, bottom: 120, zIndex: 5, boxShadow: '0 2px 8px rgba(0,0,0,0.15)' }}
+                title="回到底部"
+              />
+            ) : null}
 
             {/* 输入区（已删只读隐藏） */}
             {!readOnly ? (

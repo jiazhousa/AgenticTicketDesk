@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, memo} from 'react';
 import { Collapse, Typography } from 'antd';
 import { BulbOutlined, LoadingOutlined } from '@ant-design/icons';
 
@@ -7,7 +7,7 @@ import { BulbOutlined, LoadingOutlined } from '@ant-design/icons';
  * streaming 期间自动展开+「思考中…」标记；全文到达（ended）自动收起，可手动再展开。
  * 载荷缺全文时仅保留 delta 累积文本（镜像全文主源缺省的记档接受面）。
  */
-export default function ReasoningBlock({ text, streaming = false }: { text: string; streaming?: boolean }) {
+function ReasoningBlock({ text, streaming = false }: { text: string; streaming?: boolean }) {
   const [open, setOpen] = useState(streaming);
 
   // 流式开启时跟随展开；结束时收起一次（此后由用户自主控制）
@@ -62,3 +62,5 @@ export default function ReasoningBlock({ text, streaming = false }: { text: stri
     </div>
   );
 }
+
+export default memo(ReasoningBlock);
