@@ -159,7 +159,8 @@ export default function PlanCard({
     value: r.id,
     label: r.id === workspace?.primary ? `${r.id}（主）` : r.id,
   }));
-  const workerOptions = (workers ?? []).filter((w) => w.available !== false).map((w) => ({
+  // 全量注册表（不过滤 available）——任务执行走 task 模式：与 server 校验取值域（∈Registry）和系统提示 workers 段严格一致（块间对账裁决：available 仅对聊天会话下拉有意义）
+  const workerOptions = (workers ?? []).map((w) => ({
     value: w.id,
     label: `${w.name}（${w.id}）`,
   }));
