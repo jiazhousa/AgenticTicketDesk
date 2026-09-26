@@ -111,12 +111,12 @@ export class SessionFacade {
     });
   }
 
-  /** 会话消息分页（order=asc 用于对账翻页；cursor 为不透明令牌） */
+  /** 会话消息分页——serve 约束：cursor 不能与 order 同传（cursor 沿首页方向续翻），仅首页带 order */
   async listMessages(sessionId: string, opts: { limit?: number; order?: 'asc' | 'desc'; cursor?: string } = {}): Promise<MessagePage> {
     const qs = new URLSearchParams();
     if (opts.limit != null) qs.set('limit', String(opts.limit));
-    qs.set('order', opts.order ?? 'desc');
     if (opts.cursor != null) qs.set('cursor', opts.cursor);
+    else qs.set('order', opts.order ?? 'desc');
     const parsed = (await this.call(`/api/session/${sessionId}/message?${qs.toString()}`)) as Partial<MessagePage>;
     return {
       data: Array.isArray(parsed?.data) ? parsed.data : [],
