@@ -224,6 +224,8 @@ export function registerHumanThinkRoutes(
     const write = (frame: { seq?: number; event: HumanThinkEvent }): void => {
       raw.write(`data: ${JSON.stringify(frame)}\n\n`);
     };
+    // 连接即冲刷——Node 在首字节前不发送响应头，回放为空（after=最新）时浏览器 EventSource 将滞留 CONNECTING 直到 15s 心跳
+    raw.write(': connected\n\n');
     const detach = ht.events.attach(id, after, write);
     const hb = setInterval(() => raw.write(': hb\n\n'), 15_000);
     hb.unref?.();

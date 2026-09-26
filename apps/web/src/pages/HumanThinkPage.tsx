@@ -665,7 +665,17 @@ export default function HumanThinkPage() {
 
             {/* 消息区 */}
             <div ref={scrollRef} style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
-              <Space direction="vertical" size={12} style={{ width: '100%', maxWidth: 860, margin: '0 auto' }}>
+              {/* 块级 flex + margin auto 居中——antd Space 为 inline-flex，margin auto 无效导致宽屏左锚定（验收反馈） */}
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 12,
+                  width: '100%',
+                  maxWidth: 860,
+                  margin: '0 auto',
+                }}
+              >
                 {chatItems.length === 0 ? (
                   <Typography.Text type="secondary">
                     {readOnly ? '该会话无历史事件。' : '发送第一句话开始讨论——助手可见 workspace 声明的仓，敏感动作会先请示。'}
@@ -685,12 +695,13 @@ export default function HumanThinkPage() {
                     }
                   })
                 )}
-              </Space>
+              </div>
             </div>
 
             {/* 输入区（已删只读隐藏） */}
             {!readOnly ? (
-              <div style={{ borderTop: '1px solid #f0f0f0', padding: '10px 16px', display: 'flex', gap: 8 }}>
+              <div style={{ borderTop: '1px solid #f0f0f0', padding: '10px 20px' }}>
+              <div style={{ display: 'flex', gap: 8, width: '100%', maxWidth: 860, margin: '0 auto' }}>
                 <Input.TextArea
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
@@ -713,6 +724,7 @@ export default function HumanThinkPage() {
                 >
                   发送
                 </Button>
+              </div>
               </div>
             ) : null}
             {generating && !readOnly ? (

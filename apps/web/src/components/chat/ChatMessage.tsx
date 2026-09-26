@@ -116,7 +116,8 @@ export default function ChatMessage({
                 whiteSpace: 'pre-wrap',
               }
             : {
-                background: '#f5f5f5',
+                background: '#fff',
+                border: '1px solid #ececec',
                 color: 'rgba(0, 0, 0, 0.88)',
                 borderBottomLeftRadius: 2,
                 overflowX: 'auto',
