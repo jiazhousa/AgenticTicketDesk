@@ -8,7 +8,7 @@
 
 ## 技术方案
 
-1. **产出合同（系统提示注入）**：config-gen 为 `atd-ht-{ws}` 增 `system` 字段（`ConfigAgent.Info.system` 可选字段，app 侧注入生效——S2b2 spec r1 已核）。模板含：双职责声明（用户明确要求拆单/提单时才进入编排）、调研先行、**业务语言要求（spec 不含技术实现细节）**、计划块格式范例、字段说明（局部 id/dependsOn 引用/repoRef 取值域/workerId 取值域/plannedFiles 尾斜杠语义）、**动态注入**：该 workspace 的 repos 清单（含 id/role=primary 标记）与全局可用 workers 清单（启动期快照，与 serve 生命周期一致）——**数据链路补全（r1-h1）**：`app.ts` 唯一调用点 `buildServeConfig` 现丢 `repos.id/primary` 且 workers 未进链路——`VisionWorkspace.repos` 类型补 `id`，`app.ts` 映射补 id/primary 并传 workers 清单（app.ts 入块 1 清单）
+1. **产出合同（系统提示注入）**：config-gen 为 `atd-ht-{ws}` 增 `system` 字段（`ConfigAgent.Info.system` 可选字段，app 侧注入生效——S2b2 spec r1 已核）。模板含：双职责声明（用户明确要求拆单/提单时才进入编排）、调研先行、**业务语言要求（spec 不含技术实现细节）**、计划块格式范例、字段说明（局部 id/dependsOn 引用/repoRef 取值域/workerId 取值域/plannedFiles 尾斜杠语义）、**动态注入**：该 workspace 的 repos 清单（含 id/role=primary 标记）与全局可用 workers 清单（启动期快照，与 serve 生命周期一致）——**数据链路补全（r1-h1）**：`app.ts` 唯一调用点 `buildServeConfig` 现丢 `repos.id/primary` 且 workers 未进链路——`VisionWorkspace.repos` 类型补 `id`（源类型 `workspaces.ts:8-11` 已含 id+primary），`app.ts` 映射逐字段对应（id/role/primary）并传 workers 清单（tsc 全量把关映射完整性）
 2. **计划块协议**：助手在回复中输出 fenced 块 ```atd-plan + JSON：
    `{"story":{"title","description"},"tasks":[{"id":"t1","title","spec","repoRef?","workerId","dependsOn":[],"plannedFiles?":[]}]}`——id 为计划内局部短 id；repoRef 缺省=主仓 id
 3. **web 解析与渲染**：ChatMessage 渲染 assistant 文本前提取 ```atd-plan 块（正则+JSON.parse；失败降级原样文本）；块成功解析→渲染 PlanCard，块外文本照常 markdown；PlanCard 本地编辑态（刷新回原稿，spec 规则 9）
@@ -25,11 +25,11 @@
 |---|---|
 | `apps/server/src/app.ts` | buildServeConfig 调用面补全（r1-h1）：`VisionWorkspace.repos` 类型+映射补 `id`/`primary`；workers 清单传入 config-gen——产出合同取值域数据源 |
 | `apps/server/src/humanthink/plan.ts`（新） | PlanPayload zod schema（含局部 id/依赖/文件集形态）；校验函数（技术方案 4，单源）；confirm 编排（技术方案 5，事务+放行触发+返回映射） |
-| `apps/server/src/humanthink/routes.ts` | +`POST .../:id/plan/validate`（200 恒定）与 +`POST .../:id/plan/confirm`（200 双态）两端点——门卫同既有（assertAvailable/已删三分）；文件头「9 端点」注释勘误为 11（web `api/humanthink.ts` 与 `routes/types.ts` 同步勘误——r1-l3） |
+| `apps/server/src/humanthink/routes.ts` | +`POST .../:id/plan/validate`（200 恒定）与 +`POST .../:id/plan/confirm`（200 双态）两端点——门卫同既有（assertAvailable/已删三分）；「9 端点」注释全面勘误为 11（routes.ts 文件头+括号注、web `api/humanthink.ts` 头注、`test/api-s2b1.test.ts` describe 标题、`routes/types.ts` 契约段措辞——四处同步） |
 | `apps/server/src/humanthink/config-gen.ts` | atd-ht-{ws} 增 `system`（产出合同模板+动态 repos/workers 清单注入——技术方案 1）；模板为纯函数可单测（快照断言） |
-| `apps/server/src/dispatcher.ts` | 下游放行核心提取 `releaseChainReady(storyId)`（签名以现状为准）；onTicketSettled 改调（行为不变）；confirm 经 humanthink 模块回调触发（装配沿用 service/dispatcher 现有引用通道——plan.ts 持 dispatcher 引用经 AppRuntime） |
+| `apps/server/src/dispatcher.ts` | 下游放行核心提取 `releaseChainReady(storyId)`（签名以现状为准）；onTicketSettled 改调（行为不变）；confirm 事务后经 AppRuntime 引用调 `dispatcher.releaseChainReady(storyId)`（无 planConfirmed 命名——统一 releaseChainReady） |
 | `apps/server/src/routes/types.ts` | 契约镜像：PlanPayload/PlanIssue/PlanValidateResponse/PlanConfirmResponse |
-| `apps/server/test/humanthink/plan.test.ts`（新，**装配前提（r1-l1）**：fake-serve 上下文 + helpers 既有 humanthink 旁路/fake worker——放行断言以状态转移为准，spawn 计数允许 0（旁路态）） | 校验单源全规则（repoRef 越界/worker 不可用/id 重复/跨计划依赖/环/文件集形态）；confirm 原子性（中途失败全回滚——mock addDependency 抛错断言零残留）；confirm 后根任务放行触发（无依赖任务 DISPATCHED，有依赖任务 SPEC_READY；DISPATCHED 断言含 transitions 留痕）；排队语义衔接（闸门满→根任务排队非失败）；跨仓（repoRef=readable 落库正确）；plan 端点门卫（degraded 503/已删会话 422 三分语义——r1-l2） |
+| `apps/server/test/humanthink/plan.test.ts`（新，**装配前提（r1-l1）**：fake-serve 上下文 + helpers 既有 humanthink 旁路/fake worker——放行断言以状态转移为准，spawn 计数允许 0（旁路态）） | 校验单源全规则（repoRef 越界/worker 不可用/id 重复/跨计划依赖/环/文件集形态）；confirm 原子性（中途失败全回滚——mock addDependency 抛错断言零残留）；confirm 后根任务放行触发（无依赖任务 DISPATCHED，有依赖任务 SPEC_READY；DISPATCHED 断言含 transitions 留痕）；排队语义衔接（闸门满→根任务排队非失败）；跨仓（repoRef=readable 落库正确）；**多轮各自成链**（两次 confirm 互不影响、局部 id 互不串——验收 6）；plan 端点门卫（degraded 503/已删会话 422 三分语义）；泳道数据回归（STORY 详情含子单依赖分层——验收 5 既有能力断言） |
 | `apps/server/test/humanthink/config-gen.test.ts` | +system 产出合同快照（模板含 repos/workers 动态段/atd-plan 格式范例/业务语言要求） |
 
 **块 1 最小验证**：`pnpm -F @atd/server exec tsc --noEmit && pnpm -F @atd/server test`
